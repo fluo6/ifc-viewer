@@ -71,9 +71,16 @@ export class Viewer {
     const ifcLoader = components.get(OBC.IfcLoader);
     // Path must end with "/" — web-ifc concatenates `path + "web-ifc.wasm"`.
     // Using "/" (root-relative) is robust to whatever the document base is.
+    // MEMORY_LIMIT/TAPE_SIZE bumped so that ~100 MB IFC files don't trip
+    // wasm "memory access out of bounds" during parse.
     await ifcLoader.setup({
       autoSetWasm: false,
       wasm: { path: "/", absolute: false },
+      webIfc: {
+        COORDINATE_TO_ORIGIN: true,
+        MEMORY_LIMIT: 3 * 1024 * 1024 * 1024,  // 3 GB
+        TAPE_SIZE: 256 * 1024 * 1024,          // 256 MB
+      } as any,
     });
 
     this.fragmentsManager = components.get(OBC.FragmentsManager);
