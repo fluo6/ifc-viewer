@@ -13,7 +13,14 @@
       "Bash(timeout 25 npm run dev)",
       "Bash(timeout 30 npm run dev)",
       "PowerShell(powershell -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\fujial\\\\fujia-dev\\\\ifc-viewer\\\\scripts\\\\make-icon.ps1\")",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(awk '/^var require_web_ifc = __commonJS/,/^var require_/' node_modules/web-ifc/web-ifc-api.js)",
+      "Bash(sed -n '9125,9140p' node_modules/web-ifc/web-ifc-api.js)",
+      "Bash(sed -n '4775,4790p' node_modules/web-ifc/web-ifc-api.js)",
+      "Bash(awk '/Could not find wasm module/ {print NR\": \"$0; exit}' dist/assets/index-*.js)",
+      "Bash(xargs grep *)",
+      "Bash(node -e ' *)",
+      "Bash(node scripts/inspect-bundle.mjs)"
     ]
   }
 }
