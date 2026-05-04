@@ -2,7 +2,10 @@ import { app, BrowserWindow, ipcMain, dialog } from "electron";
 import * as path from "path";
 import * as fs from "fs";
 
-const isDev = !app.isPackaged;
+// Treat as "dev" only when explicitly told (by scripts/dev.mjs). Running
+// unpackaged electron via `electron .` should load the built dist/, not a
+// non-existent dev server.
+const isDev = process.env.ELECTRON_DEV === "1";
 let pendingOpenPath: string | null = null;
 let mainWindow: BrowserWindow | null = null;
 

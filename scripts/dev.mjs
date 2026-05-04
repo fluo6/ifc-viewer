@@ -31,7 +31,11 @@ await waitForPort(PORT);
 
 await new Promise((r) => setTimeout(r, 1500));
 
-const electron = spawn(npx, ["electron", "."], { stdio: "inherit", shell: isWin });
+const electron = spawn(npx, ["electron", "."], {
+  stdio: "inherit",
+  shell: isWin,
+  env: { ...process.env, ELECTRON_DEV: "1" },
+});
 
 const cleanup = () => {
   vite.kill(); tsc.kill(); electron.kill();
