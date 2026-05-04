@@ -70,12 +70,14 @@ export class Viewer {
 
     const ifcLoader = components.get(OBC.IfcLoader);
     // Path must end with "/" — web-ifc concatenates `path + "web-ifc.wasm"`.
-    // Using "/" (root-relative) is robust to whatever the document base is.
+    // "./" resolves relative to the document, which works for both Vite dev
+    // (http://localhost:5173/) and packaged file:// (where "/" would resolve
+    // to the drive root and 404).
     // MEMORY_LIMIT/TAPE_SIZE bumped so that ~100 MB IFC files don't trip
     // wasm "memory access out of bounds" during parse.
     await ifcLoader.setup({
       autoSetWasm: false,
-      wasm: { path: "/", absolute: false },
+      wasm: { path: "./", absolute: false },
       webIfc: {
         COORDINATE_TO_ORIGIN: true,
         MEMORY_LIMIT: 3 * 1024 * 1024 * 1024,  // 3 GB
