@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>IFC Viewer</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <div id="toolbar">
+        <button id="open-btn">Open IFC&hellip;</button>
+        <span id="model-name" class="muted">no model loaded</span>
+        <span id="model-count"></span>
+        <div id="progress" class="hidden"><div id="progress-bar"></div></div>
+      </div>
+      <div id="main">
+        <div id="categories"></div>
+        <div id="viewport">
+          <div id="dropzone"></div>
+          <div id="clipper"></div>
+        </div>
+        <div id="properties"></div>
+      </div>
+      <div id="toast-host"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,44 @@
+{
+  "name": "ifc-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist-electron/main.js",
+  "build": {
+    "appId": "com.example.ifcviewer",
+    "productName": "IFC Viewer",
+    "files": ["dist/**", "dist-electron/**", "package.json"],
+    "extraResources": ["public/web-ifc.wasm"],
+    "win": {
+      "target": "nsis",
+      "fileAssociations": [
+        { "ext": "ifc", "name": "IFC Model", "role": "Viewer" }
+      ]
+    },
+    "directories": { "output": "release" }
+  },
+  "scripts": {
+    "postinstall": "node scripts/copy-wasm.mjs",
+    "dev": "node scripts/dev.mjs",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "npm run build:renderer && npm run build:electron",
+    "dist": "npm run build && electron-builder",
+    "test": "npm run build && playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.45.0",
+    "@types/node": "^20.12.0",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.0",
+    "playwright": "^1.45.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.3.0"
+  },
+  "dependencies": {
+    "@thatopen/components": "^2.4.0",
+    "@thatopen/components-front": "^2.4.0",
+    "@thatopen/fragments": "^2.4.0",
+    "three": "^0.160.0",
+    "web-ifc": "^0.0.57"
+  }
+}
