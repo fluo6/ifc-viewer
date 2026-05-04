@@ -20,7 +20,8 @@
       "Bash(awk '/Could not find wasm module/ {print NR\": \"$0; exit}' dist/assets/index-*.js)",
       "Bash(xargs grep *)",
       "Bash(node -e ' *)",
-      "Bash(node scripts/inspect-bundle.mjs)"
+      "Bash(node scripts/inspect-bundle.mjs)",
+      "Bash(npm i *)"
     ]
   }
 }

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from "electron";
+import { app, BrowserWindow, ipcMain, dialog, session } from "electron";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -8,6 +8,22 @@ import * as fs from "fs";
 const isDev = process.env.ELECTRON_DEV === "1";
 let pendingOpenPath: string | null = null;
 let mainWindow: BrowserWindow | null = null;
+
+function enableCrossOriginIsolation() {
+  // Cross-origin isolation lets the renderer use SharedArrayBuffer, which
+  // unlocks web-ifc's multi-threaded wasm path (~2-3x faster on big IFCs).
+  // For file:// loads we have to inject COOP/COEP headers ourselves.
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        "Cross-Origin-Opener-Policy": ["same-origin"],
+        "Cross-Origin-Embedder-Policy": ["require-corp"],
+        "Cross-Origin-Resource-Policy": ["cross-origin"],
+      },
+    });
+  });
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -62,6 +78,7 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
+    enableCrossOriginIsolation();
     const ifc = process.argv.find((a) => a.toLowerCase().endsWith(".ifc"));
     if (ifc) pendingOpenPath = ifc;
     createWindow();
