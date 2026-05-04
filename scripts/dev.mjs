@@ -22,16 +22,16 @@ function waitForPort(port, timeoutMs = 30_000) {
 const isWin = process.platform === "win32";
 const npx = isWin ? "npx.cmd" : "npx";
 
-const vite = spawn(npx, ["vite"], { stdio: "inherit", shell: false });
+const vite = spawn(npx, ["vite"], { stdio: "inherit", shell: isWin });
 const tsc = spawn(npx, ["tsc", "-p", "tsconfig.electron.json", "--watch"], {
-  stdio: "inherit", shell: false,
+  stdio: "inherit", shell: isWin,
 });
 
 await waitForPort(PORT);
 
 await new Promise((r) => setTimeout(r, 1500));
 
-const electron = spawn(npx, ["electron", "."], { stdio: "inherit", shell: false });
+const electron = spawn(npx, ["electron", "."], { stdio: "inherit", shell: isWin });
 
 const cleanup = () => {
   vite.kill(); tsc.kill(); electron.kill();
