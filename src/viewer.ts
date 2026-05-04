@@ -71,17 +71,25 @@ export class Viewer {
     const ifcLoader = components.get(OBC.IfcLoader);
     // Path must end with "/" — web-ifc concatenates `path + "web-ifc.wasm"`.
     // "./" resolves relative to the document, which works for both Vite dev
-    // (http://localhost:5173/) and packaged file:// (where "/" would resolve
-    // to the drive root and 404).
-    // MEMORY_LIMIT/TAPE_SIZE bumped so that ~100 MB IFC files don't trip
-    // wasm "memory access out of bounds" during parse.
+    // and packaged file:// loads.
+    //
+    // Memory tuning:
+    //  - MEMORY_LIMIT defaults to 2 GiB; pushing past that on wasm32 in
+    //    Chromium causes "memory access out of bounds" because wasm growth
+    //    fails. Leave it default.
+    //  - TAPE_SIZE bumped to 256 MiB so the parser has headroom for big files.
+    //  - IFCOPENINGELEMENT excluded — these are the holes for doors/windows,
+    //    not visible geometry, but in many IFC files they balloon the
+    //    fragment count. Skipping them can ~halve memory use without
+    //    affecting what you see.
+    const IFCOPENINGELEMENT = 3588315303;
     await ifcLoader.setup({
       autoSetWasm: false,
       wasm: { path: "./", absolute: false },
+      excludedCategories: new Set<number>([IFCOPENINGELEMENT]),
       webIfc: {
         COORDINATE_TO_ORIGIN: true,
-        MEMORY_LIMIT: 3 * 1024 * 1024 * 1024,  // 3 GB
-        TAPE_SIZE: 256 * 1024 * 1024,          // 256 MB
+        TAPE_SIZE: 256 * 1024 * 1024,
       } as any,
     });
 
