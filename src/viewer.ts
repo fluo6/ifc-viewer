@@ -69,9 +69,11 @@ export class Viewer {
     grids.create(world);
 
     const ifcLoader = components.get(OBC.IfcLoader);
+    // Path must end with "/" — web-ifc concatenates `path + "web-ifc.wasm"`.
+    // Using "/" (root-relative) is robust to whatever the document base is.
     await ifcLoader.setup({
       autoSetWasm: false,
-      wasm: { path: "./", absolute: false },
+      wasm: { path: "/", absolute: false },
     });
 
     this.fragmentsManager = components.get(OBC.FragmentsManager);

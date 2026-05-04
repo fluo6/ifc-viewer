@@ -12,7 +12,8 @@
       "Bash(npx vite *)",
       "Bash(timeout 25 npm run dev)",
       "Bash(timeout 30 npm run dev)",
-      "PowerShell(powershell -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\fujial\\\\fujia-dev\\\\ifc-viewer\\\\scripts\\\\make-icon.ps1\")"
+      "PowerShell(powershell -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\fujial\\\\fujia-dev\\\\ifc-viewer\\\\scripts\\\\make-icon.ps1\")",
+      "Bash(npm run *)"
     ]
   }
 }
