@@ -5,7 +5,11 @@
       "Bash(git init *)",
       "Bash(git config *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(npm install *)",
+      "Bash(node scripts/copy-wasm.mjs)",
+      "Bash(npx tsc *)",
+      "Bash(npx vite *)"
     ]
   }
 }
