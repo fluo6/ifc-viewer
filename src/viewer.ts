@@ -10,6 +10,8 @@ export interface ModelLoaded {
   filename: string;
   elementCount: number;
   categories: ReadonlyMap<string, ElementId[]>;
+  /** True when loaded via the streaming pipeline; properties panel is unavailable. */
+  streamed: boolean;
 }
 
 export interface LoadProgress {
@@ -21,6 +23,12 @@ export interface Selection {
   fragmentId: string;
   expressId: ElementId;
 }
+
+// Files larger than this go through the streaming pipeline (IfcGeometryTiler
+// + IfcStreamer) instead of the in-one-shot IfcLoader. The threshold is
+// well below web-ifc's ~2 GiB wasm memory cap, accounting for the fact that
+// geometry generation typically uses 10-20× the source IFC size.
+const STREAM_THRESHOLD_BYTES = 50 * 1024 * 1024;
 
 export class Viewer {
   readonly onModelLoaded = new Emitter<ModelLoaded>();
@@ -35,6 +43,8 @@ export class Viewer {
     OBC.SimpleRenderer
   >;
   private ifcLoader!: OBC.IfcLoader;
+  private tiler!: OBC.IfcGeometryTiler;
+  private streamer!: OBF.IfcStreamer;
   private fragmentsManager!: OBC.FragmentsManager;
   private classifier!: OBC.Classifier;
   private hider!: OBC.Hider;
@@ -45,8 +55,12 @@ export class Viewer {
   private currentModel: FRAGS.FragmentsGroup | null = null;
   private currentCategories = new Map<string, ElementId[]>();
   private currentFilename = "";
+  private currentIsStreamed = false;
   private lastSelection: Selection | null = null;
   private clipPlane: any = null;
+
+  // In-memory tile store for the streaming path. Each load replaces this map.
+  private streamFiles = new Map<string, Uint8Array>();
 
   async init(container: HTMLElement): Promise<void> {
     const components = new OBC.Components();
@@ -68,29 +82,39 @@ export class Viewer {
     const grids = components.get(OBC.Grids);
     grids.create(world);
 
-    const ifcLoader = components.get(OBC.IfcLoader);
-    // Path must end with "/" — web-ifc concatenates `path + "web-ifc.wasm"`.
-    // "./" resolves relative to the document, which works for both Vite dev
-    // and packaged file:// loads.
-    //
-    // Memory tuning:
-    //  - MEMORY_LIMIT defaults to 2 GiB; pushing past that on wasm32 in
-    //    Chromium causes "memory access out of bounds" because wasm growth
-    //    fails. Leave it default.
-    //  - TAPE_SIZE bumped to 256 MiB so the parser has headroom for big files.
-    //  - IFCOPENINGELEMENT excluded — these are the holes for doors/windows,
-    //    not visible geometry, but in many IFC files they balloon the
-    //    fragment count. Skipping them can ~halve memory use without
-    //    affecting what you see.
+    // Shared web-ifc settings used by both the regular loader and the
+    // streaming tiler.
+    //  - "./" wasm path → resolves next to the document for both vite dev
+    //    and packaged file:// loads.
+    //  - MEMORY_LIMIT defaults to 2 GiB; pushing past that on wasm32 causes
+    //    "memory access out of bounds". Leave it default.
+    //  - TAPE_SIZE bumped to 256 MiB.
+    //  - IFCOPENINGELEMENT excluded — door/window holes balloon fragment
+    //    counts on big files and aren't visible.
     const IFCOPENINGELEMENT = 3588315303;
-    await ifcLoader.setup({
+    const wasmConfig = {
       autoSetWasm: false,
       wasm: { path: "./", absolute: false },
       excludedCategories: new Set<number>([IFCOPENINGELEMENT]),
       webIfc: {
         COORDINATE_TO_ORIGIN: true,
         TAPE_SIZE: 256 * 1024 * 1024,
-      } as any,
+      },
+    };
+
+    const ifcLoader = components.get(OBC.IfcLoader);
+    await ifcLoader.setup(wasmConfig as any);
+
+    const tiler = components.get(OBC.IfcGeometryTiler);
+    // The tiler exposes the same shape of settings as the loader.
+    Object.assign(tiler.settings, {
+      autoSetWasm: false,
+      wasm: { path: "./", absolute: false },
+      excludedCategories: new Set<number>([IFCOPENINGELEMENT]),
+      webIfc: {
+        COORDINATE_TO_ORIGIN: true,
+        TAPE_SIZE: 256 * 1024 * 1024,
+      },
     });
 
     this.fragmentsManager = components.get(OBC.FragmentsManager);
@@ -99,6 +123,22 @@ export class Viewer {
     this.clipper = components.get(OBC.Clipper);
     this.clipper.enabled = false;
     this.indexer = components.get(OBC.IfcRelationsIndexer);
+
+    const streamer = components.get(OBF.IfcStreamer);
+    streamer.world = world;
+    streamer.url = ""; // overridden by our custom fetch below
+    // Resolve tile filenames against our in-memory map. The streamer expects
+    // a function that returns Response | File; a Response built from the
+    // Uint8Array is the simplest fit.
+    streamer.fetch = async (fileName: string) => {
+      const data = this.streamFiles.get(fileName);
+      if (!data) {
+        throw new Error(`stream tile not found: ${fileName}`);
+      }
+      // Cast through unknown — TS3 typings of Response don't accept
+      // Uint8Array<ArrayBufferLike> directly, but Chromium handles it fine.
+      return new Response(data as unknown as BlobPart as any);
+    };
 
     const highlighter = components.get(OBF.Highlighter);
     highlighter.setup({
@@ -130,6 +170,8 @@ export class Viewer {
     this.components = components;
     this.world = world;
     this.ifcLoader = ifcLoader;
+    this.tiler = tiler;
+    this.streamer = streamer;
     this.highlighter = highlighter;
   }
 
@@ -143,6 +185,17 @@ export class Viewer {
 
     this.onLoadProgress.emit({ loaded: 0, total: buffer.byteLength });
 
+    if (buffer.byteLength > STREAM_THRESHOLD_BYTES) {
+      await this.loadIfcStreaming(buffer, name);
+    } else {
+      await this.loadIfcRegular(buffer, name);
+    }
+  }
+
+  private async loadIfcRegular(
+    buffer: Uint8Array,
+    name: string,
+  ): Promise<void> {
     let model: FRAGS.FragmentsGroup;
     try {
       model = await this.ifcLoader.load(buffer, true, name);
@@ -159,27 +212,146 @@ export class Viewer {
     this.world.scene.three.add(model);
     this.currentModel = model;
     this.currentFilename = name;
+    this.currentIsStreamed = false;
 
     this.onLoadProgress.emit({
       loaded: buffer.byteLength,
       total: buffer.byteLength,
     });
 
-    this.classifier.byEntity(model);
-    const categories = new Map<string, ElementId[]>();
-    const entities = this.classifier.list["entities"] ?? {};
-    for (const [ifcClass, group] of Object.entries(entities)) {
-      const ids: ElementId[] = [];
-      const map = (group as any).map ?? {};
-      for (const fragId of Object.keys(map)) {
-        for (const expressId of map[fragId] as Iterable<number>) {
-          ids.push(expressId);
+    this.classifyAndEmit(model, name, false);
+    this.fitToModel(model);
+  }
+
+  private async loadIfcStreaming(
+    buffer: Uint8Array,
+    name: string,
+  ): Promise<void> {
+    // Tile the IFC. The tiler emits geometry chunks and assets via async
+    // events while it processes — it does NOT hold the whole result in
+    // memory the way IfcLoader does, which is why this works for files
+    // that crash the regular loader.
+    const tileFiles = new Map<string, Uint8Array>();
+    const assets: OBC.StreamedAsset[] = [];
+    const geometries: OBC.StreamedGeometries = {};
+    let geomFileIdx = 0;
+
+    const offGeom = this.tiler.onGeometryStreamed.add(
+      async ({ buffer: tileBuffer, data }) => {
+        const fileName = `geom-${geomFileIdx++}.frag`;
+        tileFiles.set(fileName, tileBuffer);
+        for (const [idStr, geom] of Object.entries(data)) {
+          (geometries as any)[Number(idStr)] = {
+            ...geom,
+            geometryFile: fileName,
+          };
         }
+      },
+    );
+    const offAssets = this.tiler.onAssetStreamed.add(async (a) => {
+      assets.push(...a);
+    });
+    const offProgress = this.tiler.onProgress.add(async (pct) => {
+      // Map 0..1 → 0..byteLength so the existing progress UI works.
+      this.onLoadProgress.emit({
+        loaded: Math.floor(pct * buffer.byteLength),
+        total: buffer.byteLength,
+      });
+    });
+
+    try {
+      await this.tiler.streamFromBuffer(buffer);
+    } catch (err) {
+      throw new Error(`IFC tile failed: ${(err as Error).message}`);
+    } finally {
+      // Detach our event handlers so a future load doesn't double up.
+      try {
+        this.tiler.onGeometryStreamed.remove(offGeom as any);
+      } catch {
+        /* ignore */
       }
-      categories.set(ifcClass, ids);
+      try {
+        this.tiler.onAssetStreamed.remove(offAssets as any);
+      } catch {
+        /* ignore */
+      }
+      try {
+        this.tiler.onProgress.remove(offProgress as any);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (this.currentModel) this.unloadIfc();
+
+    // Hand the tiles to the streamer via our in-memory file map.
+    this.streamFiles = tileFiles;
+
+    const settings = {
+      assets,
+      geometries,
+      globalDataFileId: name,
+    } as any;
+
+    let model: FRAGS.FragmentsGroup;
+    try {
+      model = await this.streamer.load(settings, true);
+    } catch (err) {
+      this.streamFiles.clear();
+      throw new Error(`Stream-load failed: ${(err as Error).message}`);
+    }
+
+    this.currentModel = model;
+    this.currentFilename = name;
+    this.currentIsStreamed = true;
+
+    this.onLoadProgress.emit({
+      loaded: buffer.byteLength,
+      total: buffer.byteLength,
+    });
+
+    this.classifyAndEmit(model, name, true);
+    this.fitToModel(model);
+  }
+
+  private classifyAndEmit(
+    model: FRAGS.FragmentsGroup,
+    name: string,
+    streamed: boolean,
+  ): void {
+    let categories = new Map<string, ElementId[]>();
+    try {
+      this.classifier.byEntity(model);
+      const entities = this.classifier.list["entities"] ?? {};
+      for (const [ifcClass, group] of Object.entries(entities)) {
+        const ids: ElementId[] = [];
+        const map = (group as any).map ?? {};
+        for (const fragId of Object.keys(map)) {
+          for (const expressId of map[fragId] as Iterable<number>) {
+            ids.push(expressId);
+          }
+        }
+        categories.set(ifcClass, ids);
+      }
+    } catch {
+      // For streamed models without properties, classification by entity
+      // may be limited. Leave the map empty in that case.
+      categories = new Map();
     }
     this.currentCategories = categories;
 
+    let elementCount = 0;
+    for (const ids of categories.values()) elementCount += ids.length;
+
+    this.onModelLoaded.emit({
+      filename: name,
+      elementCount,
+      categories,
+      streamed,
+    });
+  }
+
+  private fitToModel(model: FRAGS.FragmentsGroup): void {
     const box = new THREE.Box3().setFromObject(model);
     const size = box.getSize(new THREE.Vector3()).length();
     const center = box.getCenter(new THREE.Vector3());
@@ -194,15 +366,6 @@ export class Viewer {
         true,
       );
     }
-
-    let elementCount = 0;
-    for (const ids of categories.values()) elementCount += ids.length;
-
-    this.onModelLoaded.emit({
-      filename: name,
-      elementCount,
-      categories,
-    });
   }
 
   unloadIfc(): void {
@@ -211,11 +374,13 @@ export class Viewer {
     try {
       this.fragmentsManager.disposeGroup(this.currentModel);
     } catch {
-      /* ignore — older versions may not have disposeGroup */
+      /* ignore */
     }
+    this.streamFiles.clear();
     this.currentModel = null;
     this.currentCategories.clear();
     this.currentFilename = "";
+    this.currentIsStreamed = false;
     this.lastSelection = null;
     this.clipper.deleteAll();
     this.clipPlane = null;
@@ -229,6 +394,10 @@ export class Viewer {
 
   getCurrentFilename(): string {
     return this.currentFilename;
+  }
+
+  isStreamed(): boolean {
+    return this.currentIsStreamed;
   }
 
   setCategoryVisible(ifcClass: string, visible: boolean): void {
@@ -254,6 +423,7 @@ export class Viewer {
     expressId: ElementId,
   ): Promise<Record<string, unknown> | null> {
     if (!this.currentModel) return null;
+    if (this.currentIsStreamed) return null; // properties not tiled in v1
     const props = await this.currentModel.getProperties(expressId);
     return (props as Record<string, unknown>) ?? null;
   }
@@ -262,10 +432,11 @@ export class Viewer {
     expressId: ElementId,
   ): Promise<Array<{ name: string; props: Record<string, unknown> }>> {
     if (!this.currentModel) return [];
+    if (this.currentIsStreamed) return [];
     try {
       await this.indexer.process(this.currentModel);
     } catch {
-      /* ignore — index may already exist */
+      /* ignore */
     }
     let psetIds: number[] = [];
     try {
@@ -364,18 +535,7 @@ export class Viewer {
 
   resetCamera(): void {
     if (this.currentModel) {
-      const box = new THREE.Box3().setFromObject(this.currentModel);
-      const size = box.getSize(new THREE.Vector3()).length();
-      const center = box.getCenter(new THREE.Vector3());
-      this.world.camera.controls.setLookAt(
-        center.x + size,
-        center.y + size,
-        center.z + size,
-        center.x,
-        center.y,
-        center.z,
-        true,
-      );
+      this.fitToModel(this.currentModel);
     } else {
       this.world.camera.controls.setLookAt(20, 20, 20, 0, 0, 0, true);
     }
