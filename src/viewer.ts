@@ -3,7 +3,10 @@ import * as OBF from "@thatopen/components-front";
 import * as FRAGS from "@thatopen/fragments";
 import * as THREE from "three";
 import { Emitter } from "./events";
+import { IfcParameterReader, type ElementParameters } from "./ifc-parameters";
 import { collectSet, type EntityResolver, type IfcSet } from "./ifc-sets";
+
+export type { ElementParameters, ParamGroup, ParamRow } from "./ifc-parameters";
 
 export type ElementId = number;
 
@@ -61,6 +64,13 @@ export class Viewer {
   private clipPlane: any = null;
   /** In-flight or settled relations indexing for the current model. */
   private relationsIndexing: Promise<void> | null = null;
+
+  /**
+   * Raw-IFC reader kept open alongside the fragments. OBC's IfcLoader strips
+   * every geometry-representation entity from the group's property store, so
+   * profile dimensions, extrusions and placements are only reachable this way.
+   */
+  private paramReader: IfcParameterReader | null = null;
 
   // In-memory tile store for the streaming path. Each load replaces this map.
   private streamFiles = new Map<string, Uint8Array>();
@@ -223,8 +233,23 @@ export class Viewer {
       total: buffer.byteLength,
     });
 
+    await this.openParameterReader(buffer);
     this.classifyAndEmit(model, name, false);
     this.fitToModel(model);
+  }
+
+  /**
+   * Second web-ifc parse of the same buffer, kept open for the model's
+   * lifetime. Non-fatal: the properties panel falls back to the fragments'
+   * own (much thinner) property store if this can't be opened.
+   */
+  private async openParameterReader(buffer: Uint8Array): Promise<void> {
+    try {
+      this.paramReader = await IfcParameterReader.open(buffer);
+    } catch (err) {
+      console.warn("parameter reader unavailable:", err);
+      this.paramReader = null;
+    }
   }
 
   private async loadIfcStreaming(
@@ -381,6 +406,8 @@ export class Viewer {
     } catch {
       /* ignore */
     }
+    this.paramReader?.close();
+    this.paramReader = null;
     this.streamFiles.clear();
     this.currentModel = null;
     this.currentCategories.clear();
@@ -422,6 +449,22 @@ export class Viewer {
   showAllCategories(): void {
     for (const c of this.currentCategories.keys()) {
       this.setCategoryVisible(c, true);
+    }
+  }
+
+  /**
+   * Full parameter set for an element — profile dimensions, extrusion,
+   * derived geometry, material and any property sets. Null when the raw reader
+   * isn't available (streamed models, or a failed second parse), in which case
+   * callers should fall back to getProperties/getPropertySets.
+   */
+  getElementParameters(expressId: ElementId): ElementParameters | null {
+    if (!this.currentModel || !this.paramReader) return null;
+    try {
+      return this.paramReader.getElementParameters(expressId);
+    } catch (err) {
+      console.warn("parameter read failed:", err);
+      return null;
     }
   }
 
