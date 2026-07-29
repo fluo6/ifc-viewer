@@ -1,12 +1,22 @@
+import { formatValue } from "../format";
 import type { Viewer } from "../viewer";
 
 export function mountProperties(viewer: Viewer): void {
   const root = document.getElementById("properties")!;
+  // Bumped by every selection and by unload. The panel is only repainted by
+  // the render that still owns the current generation -- lookups are async, so
+  // without this an earlier, slower render can resolve last and repaint the
+  // panel with the previously selected element.
+  let generation = 0;
   reset();
 
-  viewer.onModelUnloaded.on(reset);
+  viewer.onModelUnloaded.on(() => {
+    generation++;
+    reset();
+  });
 
   viewer.onSelection.on(async (sel) => {
+    const mine = ++generation;
     if (!sel) {
       reset();
       return;
@@ -14,6 +24,7 @@ export function mountProperties(viewer: Viewer): void {
     root.innerHTML = `<div class="muted" style="padding:8px">loading…</div>`;
     const direct = await viewer.getProperties(sel.expressId);
     const psets = await viewer.getPropertySets(sel.expressId);
+    if (mine !== generation) return; // superseded while we were awaiting
     root.innerHTML = "";
     root.appendChild(renderHeader(sel.expressId, direct));
     root.appendChild(renderDirect(direct));
@@ -50,7 +61,7 @@ function renderDirect(direct: Record<string, unknown> | null): HTMLElement {
       if (k === "expressID" || k === "type") continue;
       const val = (v as any)?.value ?? v;
       if (val === null || typeof val === "object") continue;
-      body.appendChild(row(k, String(val)));
+      body.appendChild(row(k, formatValue(val)));
     }
   }
   el.appendChild(body);
@@ -65,8 +76,14 @@ function renderPset(pset: {
   el.innerHTML = `<summary>${escape(pset.name)}</summary>`;
   const body = document.createElement("div");
   body.style.cssText = "padding:4px 12px";
-  for (const [k, v] of Object.entries(pset.props)) {
-    body.appendChild(row(k, v == null ? "—" : String(v)));
+  const entries = Object.entries(pset.props);
+  if (entries.length === 0) {
+    // Say so rather than showing a silently empty box -- an empty section is
+    // indistinguishable from a set the viewer failed to read.
+    body.innerHTML = `<div class="muted">(no values)</div>`;
+  }
+  for (const [k, v] of entries) {
+    body.appendChild(row(k, formatValue(v)));
   }
   el.appendChild(body);
   return el;

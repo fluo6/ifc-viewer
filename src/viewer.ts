@@ -3,6 +3,7 @@ import * as OBF from "@thatopen/components-front";
 import * as FRAGS from "@thatopen/fragments";
 import * as THREE from "three";
 import { Emitter } from "./events";
+import { collectSet, type EntityResolver, type IfcSet } from "./ifc-sets";
 
 export type ElementId = number;
 
@@ -58,6 +59,8 @@ export class Viewer {
   private currentIsStreamed = false;
   private lastSelection: Selection | null = null;
   private clipPlane: any = null;
+  /** In-flight or settled relations indexing for the current model. */
+  private relationsIndexing: Promise<void> | null = null;
 
   // In-memory tile store for the streaming path. Each load replaces this map.
   private streamFiles = new Map<string, Uint8Array>();
@@ -213,6 +216,7 @@ export class Viewer {
     this.currentModel = model;
     this.currentFilename = name;
     this.currentIsStreamed = false;
+    this.relationsIndexing = null;
 
     this.onLoadProgress.emit({
       loaded: buffer.byteLength,
@@ -304,6 +308,7 @@ export class Viewer {
     this.currentModel = model;
     this.currentFilename = name;
     this.currentIsStreamed = true;
+    this.relationsIndexing = null;
 
     this.onLoadProgress.emit({
       loaded: buffer.byteLength,
@@ -381,6 +386,7 @@ export class Viewer {
     this.currentCategories.clear();
     this.currentFilename = "";
     this.currentIsStreamed = false;
+    this.relationsIndexing = null;
     this.lastSelection = null;
     this.clipper.deleteAll();
     this.clipPlane = null;
@@ -428,16 +434,34 @@ export class Viewer {
     return (props as Record<string, unknown>) ?? null;
   }
 
-  async getPropertySets(
-    expressId: ElementId,
-  ): Promise<Array<{ name: string; props: Record<string, unknown> }>> {
+  /**
+   * Build the relations index once per loaded model.
+   *
+   * IfcRelationsIndexer.process appends to its relation map rather than
+   * replacing it, so each extra call makes every element report another copy
+   * of its property sets -- the "cards piling up" symptom. A boolean guard is
+   * not sufficient: two selections in quick succession both pass the check
+   * before either finishes indexing. Callers share one in-flight promise
+   * instead. Kept lazy so a model that is never inspected doesn't pay for it.
+   */
+  private ensureRelationsIndexed(): Promise<void> {
+    if (!this.relationsIndexing) {
+      const model = this.currentModel!;
+      this.relationsIndexing = Promise.resolve(
+        this.indexer.process(model) as unknown,
+      ).then(
+        () => undefined,
+        // A failed index must not wedge the properties panel forever.
+        () => undefined,
+      );
+    }
+    return this.relationsIndexing;
+  }
+
+  async getPropertySets(expressId: ElementId): Promise<IfcSet[]> {
     if (!this.currentModel) return [];
     if (this.currentIsStreamed) return [];
-    try {
-      await this.indexer.process(this.currentModel);
-    } catch {
-      /* ignore */
-    }
+    await this.ensureRelationsIndexed();
     let psetIds: number[] = [];
     try {
       psetIds =
@@ -449,25 +473,16 @@ export class Viewer {
     } catch {
       psetIds = [];
     }
-    const out: Array<{ name: string; props: Record<string, unknown> }> = [];
+    const model = this.currentModel;
+    const resolve: EntityResolver = (id) => model.getProperties(id) as any;
+
+    const out: IfcSet[] = [];
     for (const id of psetIds) {
-      const pset = (await this.currentModel.getProperties(id)) as any;
-      if (!pset) continue;
-      const psetName = pset.Name?.value ?? `Pset_${id}`;
-      const props: Record<string, unknown> = {};
-      const hasProps = pset.HasProperties;
-      if (Array.isArray(hasProps)) {
-        for (const ref of hasProps) {
-          const refId = ref?.value;
-          if (typeof refId !== "number") continue;
-          const single = (await this.currentModel.getProperties(refId)) as any;
-          if (single?.Name?.value !== undefined) {
-            props[String(single.Name.value)] =
-              single.NominalValue?.value ?? null;
-          }
-        }
-      }
-      out.push({ name: String(psetName), props });
+      const set = (await model.getProperties(id)) as any;
+      if (!set) continue;
+      // Handles IfcPropertySet and IfcElementQuantity alike -- they keep
+      // their contents in different attributes. See src/ifc-sets.ts.
+      out.push(await collectSet(set, resolve, id));
     }
     return out;
   }
