@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog } from "electron";
 import * as path from "path";
 import * as fs from "fs";
+import { writeWorkbook, type WorkbookModel } from "./xlsx-writer";
 
 // Treat as "dev" only when explicitly told (by scripts/dev.mjs). Running
 // unpackaged electron via `electron .` should load the built dist/, not a
@@ -90,3 +91,22 @@ ipcMain.handle("file:read", async (_event, filePath: string) => {
   const data = await fs.promises.readFile(filePath);
   return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
 });
+
+ipcMain.handle("dialog:save-xlsx", async (_event, suggestedName: string) => {
+  const result = await dialog.showSaveDialog({
+    title: "Export attributes",
+    defaultPath: suggestedName,
+    filters: [{ name: "Excel workbook", extensions: ["xlsx"] }],
+  });
+  if (result.canceled || !result.filePath) return null;
+  return result.filePath;
+});
+
+ipcMain.handle(
+  "file:write-xlsx",
+  async (_event, filePath: string, model: WorkbookModel) => {
+    // Let the rejection reach the renderer: "file is open in Excel" is the
+    // common failure and the user needs to be told, not left guessing.
+    await writeWorkbook(filePath, model);
+  },
+);
