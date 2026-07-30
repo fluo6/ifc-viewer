@@ -41,6 +41,10 @@ export interface Point3 {
 // geometry generation typically uses 10-20× the source IFC size.
 const STREAM_THRESHOLD_BYTES = 50 * 1024 * 1024;
 
+// 50 mm. The library default of 0.25 (250 mm) grabs the wrong vertex constantly
+// at building scale.
+const SNAP_DISTANCE_METRES = 0.05;
+
 export class Viewer {
   readonly onModelLoaded = new Emitter<ModelLoaded>();
   readonly onModelUnloaded = new Emitter<void>();
@@ -195,9 +199,15 @@ export class Viewer {
 
     const lengthMeasurement = components.get(OBF.LengthMeasurement);
     lengthMeasurement.world = world;
-    // The library default is 0.25 world units — 250 mm at building scale, which
-    // grabs the wrong vertex constantly. 50 mm is close enough to be useful.
-    lengthMeasurement.snapDistance = 0.05;
+    // The public snapDistance field is inert: LengthMeasurement builds its
+    // VertexPicker in its constructor, and the picker merges the value into a
+    // private config once and never re-reads it. Setting the picker's own
+    // config is the only thing that changes the actual pick radius. The field
+    // is set too, so the component doesn't misreport its own setting.
+    lengthMeasurement.snapDistance = SNAP_DISTANCE_METRES;
+    (
+      lengthMeasurement as unknown as { _vertexPicker: { config: unknown } }
+    )._vertexPicker.config = { snapDistance: SNAP_DISTANCE_METRES };
 
     // SimpleDimensionLine renders `length / scale` with `rounding` decimals.
     // Geometry is in metres, so 0.001 yields millimetres — matching the
@@ -465,6 +475,15 @@ export class Viewer {
   /** Renderer-level flag the clipper depends on. Exposed for regression tests. */
   debugLocalClippingEnabled(): boolean {
     return this.world.renderer!.three.localClippingEnabled;
+  }
+
+  /** Effective vertex-snap radius in metres. Exposed for regression tests. */
+  debugSnapDistance(): number {
+    return (
+      this.lengthMeasurement as unknown as {
+        _vertexPicker: { config: { snapDistance: number } };
+      }
+    )._vertexPicker.config.snapDistance;
   }
 
   /**

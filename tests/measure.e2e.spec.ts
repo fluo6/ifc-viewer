@@ -111,6 +111,20 @@ test("clearing removes every measurement", async () => {
   }
 });
 
+test("the effective vertex snap radius is 50 mm, not the library default", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await readyWindow(app);
+    const snap = await page.evaluate(() => (window as any).__viewer.debugSnapDistance());
+    // 0.25 here would mean the library default is still in force and the
+    // setting never took — the picker caches its config at construction.
+    expect(snap).toBeCloseTo(0.05, 6);
+  } finally {
+    await app.close();
+  }
+});
+
 test("unloading a model clears measurements and exits measure mode", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
