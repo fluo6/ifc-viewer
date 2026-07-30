@@ -28,6 +28,13 @@ export interface Selection {
   expressId: ElementId;
 }
 
+/** A world-space point, in metres. Plain data so src/ui never imports three. */
+export interface Point3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
 // Files larger than this go through the streaming pipeline (IfcGeometryTiler
 // + IfcStreamer) instead of the in-one-shot IfcLoader. The threshold is
 // well below web-ifc's ~2 GiB wasm memory cap, accounting for the fact that
@@ -39,6 +46,7 @@ export class Viewer {
   readonly onModelUnloaded = new Emitter<void>();
   readonly onSelection = new Emitter<Selection | null>();
   readonly onLoadProgress = new Emitter<LoadProgress>();
+  readonly onMeasureModeChanged = new Emitter<boolean>();
 
   private components!: OBC.Components;
   private world!: OBC.SimpleWorld<
@@ -55,6 +63,8 @@ export class Viewer {
   private clipper!: OBC.Clipper;
   private highlighter!: OBF.Highlighter;
   private indexer!: OBC.IfcRelationsIndexer;
+  private lengthMeasurement!: OBF.LengthMeasurement;
+  private measureMode = false;
 
   private currentModel: FRAGS.FragmentsGroup | null = null;
   private currentCategories = new Map<string, ElementId[]>();
@@ -183,12 +193,26 @@ export class Viewer {
       });
     }
 
+    const lengthMeasurement = components.get(OBF.LengthMeasurement);
+    lengthMeasurement.world = world;
+    // The library default is 0.25 world units — 250 mm at building scale, which
+    // grabs the wrong vertex constantly. 50 mm is close enough to be useful.
+    lengthMeasurement.snapDistance = 0.05;
+
+    // SimpleDimensionLine renders `length / scale` with `rounding` decimals.
+    // Geometry is in metres, so 0.001 yields millimetres — matching the
+    // properties panel. Note this DIVIDES: 1000 here would render 5 m as 0 mm.
+    OBF.SimpleDimensionLine.scale = 0.001;
+    OBF.SimpleDimensionLine.units = "mm";
+    OBF.SimpleDimensionLine.rounding = 0;
+
     this.components = components;
     this.world = world;
     this.ifcLoader = ifcLoader;
     this.tiler = tiler;
     this.streamer = streamer;
     this.highlighter = highlighter;
+    this.lengthMeasurement = lengthMeasurement;
   }
 
   async loadIfc(input: File | ArrayBuffer, filename?: string): Promise<void> {
@@ -403,6 +427,8 @@ export class Viewer {
 
   unloadIfc(): void {
     if (!this.currentModel) return;
+    this.setMeasureMode(false);
+    this.clearMeasurements();
     this.world.scene.three.remove(this.currentModel);
     try {
       this.fragmentsManager.disposeGroup(this.currentModel);
@@ -456,6 +482,57 @@ export class Viewer {
       lengthUnit: this.paramReader.lengthUnit,
       lengthToMetres: this.paramReader.lengthToMetres,
     };
+  }
+
+  /**
+   * Measuring and selecting both want the single click, so they are mutually
+   * exclusive. This method is the only place that knows that; scattering the
+   * inversion across the UI is how the two tools end up fighting.
+   */
+  setMeasureMode(on: boolean): void {
+    if (this.measureMode === on) return;
+    this.measureMode = on;
+    this.lengthMeasurement.enabled = on;
+    this.highlighter.enabled = !on;
+    if (on) {
+      try {
+        this.highlighter.clear();
+      } catch {
+        /* nothing selected */
+      }
+      this.lastSelection = null;
+      this.onSelection.emit(null);
+    }
+    this.onMeasureModeChanged.emit(on);
+  }
+
+  isMeasureMode(): boolean {
+    return this.measureMode;
+  }
+
+  /**
+   * Anchors the first point, or completes the line on the second call. The
+   * library's own `create` toggles between those two states.
+   */
+  placeMeasurePoint(): void {
+    if (!this.measureMode) return;
+    this.lengthMeasurement.create();
+  }
+
+  clearMeasurements(): void {
+    this.lengthMeasurement.deleteAll();
+  }
+
+  measurementCount(): number {
+    return this.lengthMeasurement.list.length;
+  }
+
+  /** Adds a dimension between two world-space points, in metres. */
+  measureBetween(a: Point3, b: Point3): void {
+    this.lengthMeasurement.createOnPoints(
+      new THREE.Vector3(a.x, a.y, a.z),
+      new THREE.Vector3(b.x, b.y, b.z),
+    );
   }
 
   setCategoryVisible(ifcClass: string, visible: boolean): void {
