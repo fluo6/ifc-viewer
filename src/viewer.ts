@@ -433,6 +433,23 @@ export class Viewer {
     return this.currentIsStreamed;
   }
 
+  /**
+   * Unit and schema metadata for the loaded model. Null when the raw parameter
+   * reader is unavailable, i.e. for streamed models.
+   */
+  getModelUnits(): {
+    schema: string;
+    lengthUnit: string;
+    lengthToMetres: number;
+  } | null {
+    if (!this.paramReader) return null;
+    return {
+      schema: this.paramReader.schema,
+      lengthUnit: this.paramReader.lengthUnit,
+      lengthToMetres: this.paramReader.lengthToMetres,
+    };
+  }
+
   setCategoryVisible(ifcClass: string, visible: boolean): void {
     if (!this.currentModel) return;
     const found = this.classifier.find({ entities: [ifcClass] });

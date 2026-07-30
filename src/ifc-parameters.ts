@@ -17,7 +17,16 @@ import * as WEBIFC from "web-ifc";
 
 export interface ParamRow {
   label: string;
+  /** Display form, e.g. "133 mm". Unchanged; the properties panel reads this. */
   value: string;
+  /**
+   * Numeric magnitude expressed in `unit`. Present only for numeric
+   * parameters, so a spreadsheet export can write real numbers instead of
+   * parsing the display string back apart.
+   */
+  raw?: number;
+  /** Unit `raw` is expressed in. "" when dimensionless. Absent with `raw`. */
+  unit?: string;
 }
 
 export interface ParamGroup {
@@ -581,12 +590,11 @@ export class IfcParameterReader {
       if (refId(raw) !== null || Array.isArray(raw)) continue;
       const value = scalarOf(raw);
       if (typeof value === "number") {
-        rows.push({
-          label: key,
-          value: ANGLE_ATTRS.test(key)
-            ? `${fmt(value)} rad`
-            : this.fmtLength(value),
-        });
+        rows.push(
+          ANGLE_ATTRS.test(key)
+            ? { label: key, value: `${fmt(value)} rad`, raw: value, unit: "rad" }
+            : this.lengthRow(key, value),
+        );
       } else if (value === null) {
         // Optional dimension absent in the file (a bare `$`).
         rows.push({ label: key, value: UNSET });
@@ -598,11 +606,11 @@ export class IfcParameterReader {
     // Arbitrary profiles carry no dimensions, so derive the useful ones.
     const outline = this.profileOutline(profile);
     if (outline) {
-      rows.push({ label: "Points", value: String(outline.count) });
-      rows.push({ label: "BoundingWidth", value: this.fmtLength(outline.width) });
-      rows.push({ label: "BoundingDepth", value: this.fmtLength(outline.depth) });
+      rows.push({ label: "Points", value: String(outline.count), raw: outline.count, unit: "" });
+      rows.push(this.lengthRow("BoundingWidth", outline.width));
+      rows.push(this.lengthRow("BoundingDepth", outline.depth));
       if (outline.simple) {
-        rows.push({ label: "EnclosedArea", value: this.fmtArea(outline.area) });
+        rows.push(this.areaRow("EnclosedArea", outline.area));
       } else {
         // A shoelace area is meaningless on a self-intersecting outline, and
         // these exports do produce them. Say so rather than print a number.
@@ -612,10 +620,7 @@ export class IfcParameterReader {
 
     const derivedArea = this.profileArea(profile, outline);
     if (derivedArea !== null) {
-      rows.push({
-        label: "CrossSectionArea (derived)",
-        value: this.fmtArea(derivedArea),
-      });
+      rows.push(this.areaRow("CrossSectionArea (derived)", derivedArea));
     }
 
     rows.push({ label: "ProfileType", value: text(scalarOf(profile.ProfileType)) });
@@ -755,24 +760,17 @@ export class IfcParameterReader {
     return {
       name: `Extrusion${suffix}`,
       rows: [
-        ...(derived === null
-          ? []
-          : [
-              {
-                label: "Volume (profile×depth)",
-                value: this.fmtVolume(derived),
-              },
-            ]),
-        { label: "OriginX", value: this.fmtLength(origin.x) },
-        { label: "OriginY", value: this.fmtLength(origin.y) },
-        { label: "OriginZ", value: this.fmtLength(origin.z) },
-        { label: "XDirX", value: fmt(xDir.x, 12) },
-        { label: "XDirY", value: fmt(xDir.y, 12) },
-        { label: "XDirZ", value: fmt(xDir.z, 12) },
-        { label: "ExtrusionX", value: this.fmtLength(extrusion.x) },
-        { label: "ExtrusionY", value: this.fmtLength(extrusion.y) },
-        { label: "ExtrusionZ", value: this.fmtLength(extrusion.z) },
-        { label: "Depth", value: this.fmtLength(depth) },
+        ...(derived === null ? [] : [this.volumeRow("Volume (profile×depth)", derived)]),
+        this.lengthRow("OriginX", origin.x),
+        this.lengthRow("OriginY", origin.y),
+        this.lengthRow("OriginZ", origin.z),
+        this.numberRow("XDirX", xDir.x, 12),
+        this.numberRow("XDirY", xDir.y, 12),
+        this.numberRow("XDirZ", xDir.z, 12),
+        this.lengthRow("ExtrusionX", extrusion.x),
+        this.lengthRow("ExtrusionY", extrusion.y),
+        this.lengthRow("ExtrusionZ", extrusion.z),
+        this.lengthRow("Depth", depth),
       ],
     };
   }
@@ -796,11 +794,11 @@ export class IfcParameterReader {
         if (refId(raw) !== null || Array.isArray(raw)) continue;
         const value = scalarOf(raw);
         if (value === null) continue;
-        rows.push({
-          label: key,
-          value:
-            typeof value === "number" ? this.fmtProfileProperty(key, value) : text(value),
-        });
+        rows.push(
+          typeof value === "number"
+            ? this.profilePropertyRow(key, value)
+            : { label: key, value: text(value) },
+        );
       }
       if (rows.length) {
         out.push({ name: `${this.classOf(props)}${suffix}`, rows, open: false });
@@ -810,16 +808,16 @@ export class IfcParameterReader {
   }
 
   /** Converts a section property into the display length unit and labels it. */
-  private fmtProfileProperty(attr: string, value: number): string {
+  private profilePropertyRow(attr: string, value: number): ParamRow {
     for (const [pattern, exponent] of PROFILE_PROPERTY_DIMENSION) {
       if (!pattern.test(attr)) continue;
       const converted = value * this.modelToDisplay ** exponent;
-      const suffix = exponent === 1 ? "" : superscript(exponent);
-      return `${fmt(converted)} ${DISPLAY_LENGTH_UNIT}${suffix}`;
+      const unit = `${DISPLAY_LENGTH_UNIT}${exponent === 1 ? "" : superscript(exponent)}`;
+      return { label: attr, value: `${fmt(converted)} ${unit}`, raw: converted, unit };
     }
     // Unknown dimension (e.g. PhysicalWeight): report the stored number as-is
     // rather than guess at a conversion.
-    return fmt(value);
+    return { label: attr, value: fmt(value), raw: value, unit: "" };
   }
 
   // ------------------------------------------------------- derived geometry
@@ -903,27 +901,18 @@ export class IfcParameterReader {
     const rows: ParamRow[] = [
       // Significant digits, not fixed decimals: a small plate at 0.008 m³
       // would otherwise lose most of its precision.
-      { label: "Volume", value: `${fmtSignificant(volume)} m³` },
-      { label: "Area", value: `${fmtSignificant(area)} m²` },
+      this.siRow("Volume", volume, "m³"),
+      this.siRow("Area", area, "m²"),
     ];
     if (volume > 0) {
       rows.push(
-        {
-          label: "CenterOfGravityX",
-          value: this.fmtLengthFromMetres(centroid.x / signedVolume),
-        },
-        {
-          label: "CenterOfGravityY",
-          value: this.fmtLengthFromMetres(centroid.y / signedVolume),
-        },
-        {
-          label: "CenterOfGravityZ",
-          value: this.fmtLengthFromMetres(centroid.z / signedVolume),
-        },
+        this.metresLengthRow("CenterOfGravityX", centroid.x / signedVolume),
+        this.metresLengthRow("CenterOfGravityY", centroid.y / signedVolume),
+        this.metresLengthRow("CenterOfGravityZ", centroid.z / signedVolume),
       );
     }
     rows.push({ label: "IsSolid", value: closed && volume > 0 ? "True" : "False" });
-    rows.push({ label: "Triangles", value: String(triangles) });
+    rows.push({ label: "Triangles", value: String(triangles), raw: triangles, unit: "" });
 
     // These values describe the tessellated solid, which is not always what the
     // profile says it should be — web-ifc 0.0.68 halves the wall thickness of
@@ -989,10 +978,11 @@ export class IfcParameterReader {
         },
       ];
       const offset = numberOf(entity.OffsetFromReferenceLine);
-      rows.push({
-        label: "OffsetFromReferenceLine",
-        value: offset === null ? UNSET : this.fmtLength(offset),
-      });
+      rows.push(
+        offset === null
+          ? { label: "OffsetFromReferenceLine", value: UNSET }
+          : this.lengthRow("OffsetFromReferenceLine", offset),
+      );
       groups.push({ name: "IfcMaterialLayerSetUsage", rows });
       const setId = refId(entity.ForLayerSet);
       if (setId !== null) this.describeMaterial(setId, groups, materials, depth + 1);
@@ -1023,7 +1013,7 @@ export class IfcParameterReader {
           value: `${materialName} · ${this.fmtLength(thickness)}`,
         });
       }
-      rows.push({ label: "TotalThickness", value: this.fmtLength(total) });
+      rows.push(this.lengthRow("TotalThickness", total));
       groups.push({ name: "IfcMaterialLayerSet", rows });
       return;
     }
@@ -1142,10 +1132,14 @@ export class IfcParameterReader {
 
     if (prop.NominalValue !== undefined) {
       const value = scalarOf(prop.NominalValue);
-      return {
-        label,
-        value: value === null ? UNSET : `${text(value)}${unitSuffix()}`,
-      };
+      if (value === null) return { label, value: UNSET };
+      const unitId = refId(prop.Unit);
+      const unit = unitId === null ? null : this.line(unitId);
+      const symbol = unit ? this.unitSymbol(unit) : "";
+      const display = `${text(value)}${symbol ? ` ${symbol}` : ""}`;
+      return typeof value === "number"
+        ? { label, value: display, raw: value, unit: symbol }
+        : { label, value: display };
     }
     if (kind === "IFCPROPERTYENUMERATEDVALUE") {
       const values = asArray(prop.EnumerationValues)
@@ -1186,10 +1180,10 @@ export class IfcParameterReader {
       if (prop[key] === undefined) continue;
       const value = numberOf(prop[key]);
       if (value === null) return { label, value: UNSET };
-      if (key === "LengthValue") return { label, value: this.fmtLength(value) };
-      if (key === "AreaValue") return { label, value: this.fmtArea(value) };
-      if (key === "VolumeValue") return { label, value: this.fmtVolume(value) };
-      return { label, value: fmt(value) };
+      if (key === "LengthValue") return this.lengthRow(label, value);
+      if (key === "AreaValue") return this.areaRow(label, value);
+      if (key === "VolumeValue") return this.volumeRow(label, value);
+      return { label, value: fmt(value), raw: value, unit: "" };
     }
     return null;
   }
@@ -1335,6 +1329,56 @@ export class IfcParameterReader {
 
   private fmtVolume(value: number): string {
     return `${fmtSignificant(value * this.lengthToMetres ** 3)} m³`;
+  }
+
+  // --- Row builders -------------------------------------------------------
+  // Every numeric parameter goes through one of these so `raw`/`unit` can
+  // never drift from the formatted string beside it.
+
+  private lengthRow(label: string, value: number): ParamRow {
+    return {
+      label,
+      value: this.fmtLength(value),
+      raw: value * this.modelToDisplay,
+      unit: DISPLAY_LENGTH_UNIT,
+    };
+  }
+
+  /** For values web-ifc already scaled to metres (tessellated geometry). */
+  private metresLengthRow(label: string, metres: number): ParamRow {
+    return {
+      label,
+      value: this.fmtLengthFromMetres(metres),
+      raw: metres / DISPLAY_LENGTH_IN_METRES,
+      unit: DISPLAY_LENGTH_UNIT,
+    };
+  }
+
+  private areaRow(label: string, modelUnits: number): ParamRow {
+    return {
+      label,
+      value: this.fmtArea(modelUnits),
+      raw: modelUnits * this.lengthToMetres ** 2,
+      unit: "m²",
+    };
+  }
+
+  private volumeRow(label: string, modelUnits: number): ParamRow {
+    return {
+      label,
+      value: this.fmtVolume(modelUnits),
+      raw: modelUnits * this.lengthToMetres ** 3,
+      unit: "m³",
+    };
+  }
+
+  /** Volume/area already in SI, as produced from the tessellated mesh. */
+  private siRow(label: string, si: number, unit: "m²" | "m³"): ParamRow {
+    return { label, value: `${fmtSignificant(si)} ${unit}`, raw: si, unit };
+  }
+
+  private numberRow(label: string, value: number, decimals = 3): ParamRow {
+    return { label, value: fmt(value, decimals), raw: value, unit: "" };
   }
 }
 
