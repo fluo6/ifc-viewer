@@ -204,6 +204,58 @@ test("property sets are qualified by their own set name", () => {
   expect(cell(model, "Beams", 0, "Pset_BeamCommon.Reference")).toBe("200UB25.4");
 });
 
+test("repeated groups with the same name are disambiguated by occurrence, not overwritten", () => {
+  const model = buildWorkbook(
+    input([
+      element(1, "IfcWall", "W1", [
+        REFERENCE,
+        { name: "IfcMaterial", rows: [{ label: "Name", value: "Concrete" }] },
+        { name: "IfcMaterial", rows: [{ label: "Name", value: "Insulation" }] },
+        { name: "IfcMaterial", rows: [{ label: "Name", value: "Brick" }] },
+      ]),
+    ]),
+  );
+  expect(cell(model, "Walls", 0, "Material.Name")).toBe("Concrete");
+  expect(cell(model, "Walls", 0, "Material 2.Name")).toBe("Insulation");
+  expect(cell(model, "Walls", 0, "Material 3.Name")).toBe("Brick");
+});
+
+test("the multi-solid suffix is not treated as a repeated group name", () => {
+  const model = buildWorkbook(
+    input([
+      element(1, "IfcBeam", "B1", [
+        REFERENCE,
+        { name: "IfcShapeProfile", rows: [{ label: "ProfileName", value: "A" }] },
+        { name: "IfcShapeProfile 2", rows: [{ label: "ProfileName", value: "B" }] },
+      ]),
+    ]),
+  );
+  const headers = sheet(model, "Beams").columns.map((c) => c.header);
+  expect(headers).toContain("Profile.ProfileName");
+  expect(headers).not.toContain("Profile 2.ProfileName");
+  expect(cell(model, "Beams", 0, "SolidCount")).toBe(2);
+});
+
+test("Level and GUID become empty cells for the reader's unset marker, not the literal marker", () => {
+  const model = buildWorkbook(
+    input([
+      element(1, "IfcBeam", "B1", [
+        {
+          name: "ReferenceObject",
+          rows: [
+            { label: "Name", value: "B1" },
+            { label: "IFC Class", value: "IfcBeam" },
+            { label: "GUID (IFC)", value: "—" },
+            { label: "Container", value: "— (IfcBuildingStorey)" },
+          ],
+        },
+      ]),
+    ]),
+  );
+  expect(cell(model, "Beams", 0, "Level")).toBeNull();
+  expect(cell(model, "Beams", 0, "GUID")).toBeNull();
+});
+
 test("one sheet per class, named in plural", () => {
   const model = buildWorkbook(
     input([

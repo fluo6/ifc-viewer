@@ -112,6 +112,22 @@ function prefixFor(base: string): string {
   return GROUP_PREFIX.get(base) ?? `${base}.`;
 }
 
+/**
+ * An element can carry several groups with the identical base name (e.g. one
+ * `IfcMaterial` group per material layer). Writing them all through the same
+ * prefix would let later groups silently overwrite earlier ones, so the Nth
+ * occurrence of a base name gets its own `<Label> N.` prefix instead.
+ */
+function prefixForOccurrence(base: string, occurrence: number): string {
+  const label = prefixFor(base).replace(/\.$/, "");
+  return occurrence > 1 ? `${label} ${occurrence}.` : `${label}.`;
+}
+
+/** The reader's marker for "not set", or a blank string, both mean an empty cell. */
+function nullIfAbsent(value: string): CellValue {
+  return value === "" || value === UNSET ? null : value;
+}
+
 /** `IfcBeam` -> `Beams`. Excel forbids []:*?/\ and caps names at 31 chars. */
 function sheetNameFor(ifcClass: string): string {
   const stem = ifcClass.replace(/^Ifc/, "") || ifcClass;
@@ -157,13 +173,17 @@ export function buildWorkbook(input: ReportInput): WorkbookModel {
     record.set("ExpressID", element.expressId);
     record.set("Name", element.name);
     record.set("IfcClass", element.ifcClass);
-    record.set("GUID", referenceRow("GUID (IFC)") ?? "");
-    record.set("Level", levelFrom(referenceRow("Container")));
+    record.set("GUID", nullIfAbsent(referenceRow("GUID (IFC)") ?? ""));
+    record.set("Level", nullIfAbsent(levelFrom(referenceRow("Container"))));
     const commonType = referenceRow("Common Type");
     record.set("CommonType", commonType === UNSET ? null : (commonType ?? ""));
 
     let solids = 1;
     let suspect = false;
+    // Counts groups by base name, but only those that reach the per-row loop
+    // below: the multi-solid suffix (index > 1) is a different concept and is
+    // already skipped above, so it must not also bump this counter.
+    const occurrences = new Map<string, number>();
 
     for (const group of element.groups) {
       const base = baseGroupName(group.name);
@@ -173,7 +193,9 @@ export function buildWorkbook(input: ReportInput): WorkbookModel {
       // Only the first solid populates columns; a sheet cannot hold N solids.
       if (index > 1) continue;
 
-      const prefix = base === "ReferenceObject" ? "" : prefixFor(base);
+      const occurrence = (occurrences.get(base) ?? 0) + 1;
+      occurrences.set(base, occurrence);
+      const prefix = base === "ReferenceObject" ? "" : prefixForOccurrence(base, occurrence);
       for (const row of group.rows) {
         if (row.label.includes("Tessellation")) {
           suspect = true;
