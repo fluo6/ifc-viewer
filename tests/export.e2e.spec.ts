@@ -46,6 +46,60 @@ test("the export button writes a workbook for the loaded model", async () => {
   }
 });
 
+test("a double click while the save dialog is open only starts one export", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await readyWindow(app);
+    const bytes = [...readFileSync(FIXTURE)];
+    await page.evaluate(async (data) => {
+      await (window as any).__viewer.loadIfc(new Uint8Array(data).buffer, "i-beam.ifc");
+    }, bytes);
+
+    // Stub the handler to resolve slowly, reproducing the window during
+    // which the real (unparented, non-modal) native save dialog would be
+    // open and the renderer still fully interactive.
+    const target = path.join(mkdtempSync(path.join(tmpdir(), "export-e2e-dbl-")), "out.xlsx");
+    await app.evaluate(async ({ ipcMain }, filePath) => {
+      (globalThis as any).__saveXlsxCalls = 0;
+      ipcMain.removeHandler("dialog:save-xlsx");
+      ipcMain.handle("dialog:save-xlsx", async () => {
+        (globalThis as any).__saveXlsxCalls++;
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        return filePath;
+      });
+    }, target);
+
+    const button = page.locator("#export-btn");
+
+    // Dispatch two real clicks back-to-back in the same browser turn -- this
+    // is what a physical double click looks like: the second event fires
+    // before the first click handler's async work (the dialog await) has
+    // had any chance to resolve. Using Playwright's own locator.click() twice
+    // would instead re-run actionability waits for each call and could let
+    // the second click land only after the first export has already
+    // finished, which is not the race we're reproducing.
+    await page.evaluate(() => {
+      const btn = document.getElementById("export-btn") as HTMLButtonElement;
+      btn.click();
+      btn.click();
+    });
+
+    await expect(page.locator("#toast-host")).toContainText("Exported", {
+      timeout: 30_000,
+    });
+
+    const calls = await app.evaluate(() => (globalThis as any).__saveXlsxCalls);
+    expect(calls).toBe(1);
+
+    // The fix must not leave the button stuck disabled or mislabelled.
+    await expect(button).toBeEnabled();
+    await expect(button).toHaveText("Export XLSX");
+  } finally {
+    await app.close();
+  }
+});
+
 test("cancelling the save dialog is a silent no-op", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();

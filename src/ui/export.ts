@@ -35,14 +35,21 @@ export function mountExport(viewer: Viewer): void {
 
     const sourceName = viewer.getCurrentFilename() || "model.ifc";
     const suggested = `${sourceName.replace(/\.ifc$/i, "")}.xlsx`;
-    const filePath = await window.electron.saveXlsxDialog(suggested);
-    if (!filePath) return; // cancelled -- the user changed their mind
 
+    // Claim busy (and disable the button) before opening the dialog, not
+    // after it resolves. main's dialog:save-xlsx has no parent BrowserWindow,
+    // so the native dialog isn't modal and the renderer stays fully
+    // interactive for as long as the user takes to pick a filename -- a
+    // second click in that window must hit the `if (busy) return;` guard
+    // above rather than opening a second dialog.
     busy = true;
     button.disabled = true;
     const previousLabel = button.textContent;
-    button.textContent = "Exporting…";
     try {
+      const filePath = await window.electron.saveXlsxDialog(suggested);
+      if (!filePath) return; // cancelled -- the user changed their mind, silent no-op
+
+      button.textContent = "Exporting…";
       const model = buildWorkbook(
         { filename: sourceName, ...units, elements: collect(viewer) },
         new Date().toISOString(),

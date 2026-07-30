@@ -72,6 +72,12 @@ test("Halev model exports the expected sheets and row counts", async () => {
     const page = await readyWindow(app);
     const target = await exportModel(app, page, HALEV);
 
+    // The toast's element count excludes the Profiles and Model sheets from
+    // the row total -- assert it here rather than only via the sheet row
+    // counts below, so a regression in that count shows up even if the
+    // workbook itself still adds up.
+    await expect(page.locator("#toast-host")).toContainText("887");
+
     const book = new ExcelJS.Workbook();
     await book.xlsx.readFile(target);
     const names = book.worksheets.map((s) => s.name);
