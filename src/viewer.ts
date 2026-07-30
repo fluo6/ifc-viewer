@@ -84,7 +84,10 @@ export class Viewer {
       OBC.SimpleRenderer
     >();
     world.scene = new OBC.SimpleScene(components);
-    world.renderer = new OBC.SimpleRenderer(components, container);
+    // RendererWith2D extends SimpleRenderer and adds a CSS2DRenderer, which is
+    // what draws measurement labels. Its label layer is pointer-events:none, so
+    // it does not intercept selection clicks.
+    world.renderer = new OBF.RendererWith2D(components, container);
     world.camera = new OBC.SimpleCamera(components);
     world.scene.setup();
     components.init();
@@ -431,6 +434,11 @@ export class Viewer {
 
   isStreamed(): boolean {
     return this.currentIsStreamed;
+  }
+
+  /** Renderer-level flag the clipper depends on. Exposed for regression tests. */
+  debugLocalClippingEnabled(): boolean {
+    return this.world.renderer!.three.localClippingEnabled;
   }
 
   /**
