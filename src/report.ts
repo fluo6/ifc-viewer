@@ -30,6 +30,13 @@ export interface WorkbookModel {
   truncatedMultiSolid: number;
   /** Elements that produced no parameters and were left out. */
   skipped: number;
+  /**
+   * Rows that declared a different unit than the one already in their column's
+   * header. The header keeps the first unit and the magnitude is written
+   * unconverted, so these cells are wrong by whatever the ratio is -- the count
+   * exists so that is stated rather than discovered by a reader summing them.
+   */
+  unitConflicts: number;
 }
 
 export interface ReportInput {
@@ -98,14 +105,26 @@ export function cellOf(row: ParamRow): CellValue {
   return row.value;
 }
 
+/**
+ * Groups the reader suffixes with a solid number. Nothing else is: a property
+ * set legitimately named `Zone 2` is a property set, and reading its trailing
+ * digit as a solid index would drop the whole set (index > 1 is skipped) while
+ * blaming a multi-solid truncation that never happened.
+ */
+function isSolidSuffixed(base: string): boolean {
+  return base === "IfcShapeProfile" || base === "Extrusion" || SECTION_PROPERTY_GROUP.test(base);
+}
+
 /** `"Extrusion 2"` -> `"Extrusion"`; a suffix marks the Nth solid. */
 function baseGroupName(name: string): string {
-  return name.replace(/ \d+$/, "");
+  const stripped = name.replace(/ \d+$/, "");
+  return stripped !== name && isSolidSuffixed(stripped) ? stripped : name;
 }
 
 function solidIndex(name: string): number {
   const match = / (\d+)$/.exec(name);
-  return match ? Number(match[1]) : 1;
+  if (!match) return 1;
+  return isSolidSuffixed(name.slice(0, match.index)) ? Number(match[1]) : 1;
 }
 
 function prefixFor(base: string): string {
@@ -143,7 +162,64 @@ function levelFrom(container: string | undefined): string {
 interface SheetAccumulator {
   name: string;
   columns: Map<string, ColumnDef>;
+  /** First non-empty unit seen per column key; see `noteColumn`. */
+  units: Map<string, string>;
   records: Array<Map<string, CellValue>>;
+}
+
+/**
+ * Registers `key` as a column and settles its unit suffix.
+ *
+ * The unit cannot be taken from whichever row happens to mention the key first:
+ * an unset optional dimension (`FilletRadius`, `OffsetFromReferenceLine`)
+ * arrives with no unit at all, so scan order alone would decide whether the
+ * column says `[mm]` -- and every later magnitude would sit under a unit-less
+ * header. The first *non-empty* unit wins instead, upgrading a header already
+ * created without one. The key itself stays unqualified so the unset row and
+ * the valued row share one column.
+ *
+ * Returns 1 when a later row declares a *different* non-empty unit. Both units
+ * are plausible readings of the file (IfcPropertySingleValue carries its own
+ * IfcUnit, so beam A can say millimetres and beam B metres), and rescaling
+ * silently would be inventing data, so the first header stands and the
+ * disagreement is counted for the caller to report.
+ */
+function noteColumn(
+  columns: Map<string, ColumnDef>,
+  units: Map<string, string>,
+  key: string,
+  unit: string | undefined,
+): number {
+  if (unit) {
+    const recorded = units.get(key);
+    if (recorded === undefined) {
+      units.set(key, unit);
+      columns.set(key, { key, header: `${key} [${unit}]` });
+      return 0;
+    }
+    if (recorded !== unit) return 1;
+  }
+  if (!columns.has(key)) columns.set(key, { key, header: key });
+  return 0;
+}
+
+/**
+ * Final value for one cell.
+ *
+ * A unit-bearing column is numeric by construction -- some row declared a
+ * magnitude in `[mm]` or `[m²]` for it -- so anything non-numeric in it is
+ * prose that leaked across from the properties panel. `EnclosedArea` reads
+ * "n/a (self-intersecting outline)" for a self-intersecting slab outline,
+ * which is the honest thing to show a human and poison in a spreadsheet:
+ * Excel's SUM skips the text row and reports a total that is quietly short.
+ * Blanking it makes the gap visible as a gap. Booleans get the same treatment;
+ * they are not expected here, and a TRUE in a millimetre column is no more
+ * summable than the prose is.
+ */
+function materialise(value: CellValue | undefined, unitBearing: boolean): CellValue {
+  const cell = value ?? null;
+  if (!unitBearing) return cell;
+  return typeof cell === "number" ? cell : null;
 }
 
 /**
@@ -151,11 +227,16 @@ interface SheetAccumulator {
  * element -- repeating MomentOfInertiaY across 501 beams is both bloat and a
  * misstatement of where the data lives. Elements join on Profile.ProfileName.
  */
-function buildProfilesSheet(elements: ElementParameters[]): SheetModel | null {
+function buildProfilesSheet(elements: ElementParameters[]): {
+  sheet: SheetModel | null;
+  unitConflicts: number;
+} {
   const columns = new Map<string, ColumnDef>([
     ["ProfileName", { key: "ProfileName", header: "ProfileName" }],
   ]);
+  const units = new Map<string, string>();
   const records = new Map<string, Map<string, CellValue>>();
+  let unitConflicts = 0;
 
   for (const element of elements) {
     // Only solid 1's profile stands for this element's ProfileName; a second
@@ -193,12 +274,7 @@ function buildProfilesSheet(elements: ElementParameters[]): SheetModel | null {
     for (const group of [profile, ...sections]) {
       for (const row of group.rows) {
         if (row.label === "ProfileName") continue;
-        if (!columns.has(row.label)) {
-          columns.set(row.label, {
-            key: row.label,
-            header: row.unit ? `${row.label} [${row.unit}]` : row.label,
-          });
-        }
+        unitConflicts += noteColumn(columns, units, row.label, row.unit);
         // First non-null value per key wins: a key merely absent so far (or
         // present but null, e.g. the reader's unset marker) is fillable by a
         // later element, but once a real value lands it is not replaced. If
@@ -215,14 +291,17 @@ function buildProfilesSheet(elements: ElementParameters[]): SheetModel | null {
     }
   }
 
-  if (records.size === 0) return null;
+  if (records.size === 0) return { sheet: null, unitConflicts };
   const cols = [...columns.values()];
   return {
-    name: "Profiles",
-    columns: cols,
-    rows: [...records.values()].map((record) =>
-      cols.map((col) => record.get(col.key) ?? null),
-    ),
+    sheet: {
+      name: "Profiles",
+      columns: cols,
+      rows: [...records.values()].map((record) =>
+        cols.map((col) => materialise(record.get(col.key), units.has(col.key))),
+      ),
+    },
+    unitConflicts,
   };
 }
 
@@ -261,6 +340,7 @@ export function buildWorkbook(
   const accumulators = new Map<string, SheetAccumulator>();
   let truncatedMultiSolid = 0;
   let skipped = 0;
+  let unitConflicts = 0;
 
   for (const element of input.elements) {
     if (!element.groups.length) {
@@ -270,7 +350,7 @@ export function buildWorkbook(
     const sheetName = sheetNameFor(element.ifcClass);
     let acc = accumulators.get(sheetName);
     if (!acc) {
-      acc = { name: sheetName, columns: new Map(), records: [] };
+      acc = { name: sheetName, columns: new Map(), units: new Map(), records: [] };
       // Identity first, so the leading columns are stable across sheets.
       for (const col of IDENTITY_COLUMNS) acc.columns.set(col.key, col);
       accumulators.set(sheetName, acc);
@@ -315,13 +395,7 @@ export function buildWorkbook(
         if (base === "ReferenceObject" && REFERENCE_HANDLED.has(row.label)) continue;
 
         const key = `${prefix}${row.label}`;
-        if (!acc.columns.has(key)) {
-          const unit = row.unit;
-          acc.columns.set(key, {
-            key,
-            header: unit ? `${key} [${unit}]` : key,
-          });
-        }
+        unitConflicts += noteColumn(acc.columns, acc.units, key, row.unit);
         record.set(key, cellOf(row));
       }
     }
@@ -337,15 +411,18 @@ export function buildWorkbook(
     // Flags last, after every parameter column discovered for this class.
     for (const col of FLAG_COLUMNS) acc.columns.set(col.key, col);
     const columns = [...acc.columns.values()];
+    // Materialised only now that the scan is over, so every column's unit is
+    // final and the outcome does not depend on element order.
     const rows = acc.records.map((record) =>
-      columns.map((col) => record.get(col.key) ?? null),
+      columns.map((col) => materialise(record.get(col.key), acc.units.has(col.key))),
     );
     sheets.push({ name: acc.name, columns, rows });
   }
 
   const profiles = buildProfilesSheet(input.elements);
-  if (profiles) sheets.push(profiles);
+  unitConflicts += profiles.unitConflicts;
+  if (profiles.sheet) sheets.push(profiles.sheet);
   sheets.push(buildModelSheet(input, sheets, exportedAt));
 
-  return { sheets, truncatedMultiSolid, skipped };
+  return { sheets, truncatedMultiSolid, skipped, unitConflicts };
 }

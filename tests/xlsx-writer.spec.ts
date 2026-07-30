@@ -84,8 +84,25 @@ test("expected sheets exist and the header row is frozen", async () => {
   expect(names).toContain("Profiles");
   expect(names).toContain("Model");
   const beams = book.getWorksheet("Beams")!;
-  expect(beams.views[0]?.state).toBe("frozen");
-  expect(beams.views[0]?.ySplit).toBe(1);
+  const view = beams.views[0];
+  expect(view?.state).toBe("frozen");
+  // ySplit only exists on the frozen member of exceljs's view union.
+  if (view?.state !== "frozen") throw new Error(`expected a frozen view: ${view?.state}`);
+  expect(view.ySplit).toBe(1);
+});
+
+test("an absent dimension is a genuinely empty cell, not \"null\" and not 0", async () => {
+  // The fixture leaves FilletRadius unset, which is the whole point of the
+  // null cell value: an empty cell is excluded from AVERAGE and COUNT, a 0
+  // silently skews both.
+  const book = await exportFixture();
+  const beams = book.getWorksheet("Beams")!;
+  const header = headerRow(beams).find((h) => h.startsWith("Profile.FilletRadius"));
+  expect(header).toBeDefined();
+  const col = headerRow(beams).indexOf(header!) + 1; // headerRow drops the 1-based hole
+  const cell = beams.getRow(2).getCell(col);
+  expect(cell.value).toBeNull();
+  expect(cell.type).toBe(ExcelJS.ValueType.Null);
 });
 
 test("section properties live on Profiles, one row per section", async () => {

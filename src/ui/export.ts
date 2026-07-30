@@ -50,8 +50,9 @@ export function mountExport(viewer: Viewer): void {
       if (!filePath) return; // cancelled -- the user changed their mind, silent no-op
 
       button.textContent = "Exporting…";
+      const { elements, unreadable } = collect(viewer);
       const model = buildWorkbook(
-        { filename: sourceName, ...units, elements: collect(viewer) },
+        { filename: sourceName, ...units, elements },
         new Date().toISOString(),
       );
       await window.electron.writeXlsx(filePath, model);
@@ -59,10 +60,17 @@ export function mountExport(viewer: Viewer): void {
         .filter((s) => s.name !== "Model" && s.name !== "Profiles")
         .reduce((n, s) => n + s.rows.length, 0);
       const notes: string[] = [];
+      // Everything the workbook could not represent gets said out loud here;
+      // an export that quietly loses rows or mixes units is worse than one
+      // that admits it.
+      if (unreadable > 0) notes.push(`${unreadable} unreadable`);
       if (model.skipped > 0) notes.push(`${model.skipped} skipped`);
       if (model.truncatedMultiSolid > 0) {
         // Never let a truncation pass unmentioned.
         notes.push(`${model.truncatedMultiSolid} multi-solid truncated to their first solid`);
+      }
+      if (model.unitConflicts > 0) {
+        notes.push(`${model.unitConflicts} values whose unit differs from their column`);
       }
       const suffix = notes.length ? ` (${notes.join(", ")})` : "";
       toast(
@@ -79,16 +87,24 @@ export function mountExport(viewer: Viewer): void {
   });
 }
 
-/** Every element the classifier knows about, with its parameters. */
-function collect(viewer: Viewer): ElementParameters[] {
-  const out: ElementParameters[] = [];
+/**
+ * Every element the classifier knows about, with its parameters, plus how many
+ * could not be read at all.
+ *
+ * Viewer.getElementParameters swallows a read failure and returns null, so a
+ * failing element never reaches buildWorkbook and its `skipped` counter cannot
+ * see it. One unreadable element must not lose the other 1300, but it must not
+ * disappear without mention either -- hence the count travels back with them.
+ */
+function collect(viewer: Viewer): { elements: ElementParameters[]; unreadable: number } {
+  const elements: ElementParameters[] = [];
+  let unreadable = 0;
   for (const ids of viewer.getCategories().values()) {
     for (const id of ids) {
-      // One unreadable element must not lose the other 1300; buildWorkbook
-      // counts the gaps via `skipped`.
       const params = viewer.getElementParameters(id);
-      if (params) out.push(params);
+      if (params) elements.push(params);
+      else unreadable++;
     }
   }
-  return out;
+  return { elements, unreadable };
 }

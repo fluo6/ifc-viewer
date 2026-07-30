@@ -406,3 +406,101 @@ test("Profiles is omitted when nothing has a profile", () => {
   const model = buildWorkbook(input([element(1, "IfcBeam", "B1", [REFERENCE])]));
   expect(model.sheets.map((s) => s.name)).not.toContain("Profiles");
 });
+
+test("a unit-less row scanned first does not strand later values under a unit-less header", () => {
+  // B1's FilletRadius is absent, so its row carries no unit; B2 supplies one.
+  // Scan order must not decide whether the column says [mm].
+  const model = buildWorkbook(
+    input([
+      element(1, "IfcBeam", "B1", [
+        REFERENCE,
+        { name: "IfcShapeProfile", rows: [{ label: "FilletRadius", value: "—" }] },
+      ]),
+      element(2, "IfcBeam", "B2", [
+        REFERENCE,
+        {
+          name: "IfcShapeProfile",
+          rows: [{ label: "FilletRadius", value: "9 mm", raw: 9, unit: "mm" }],
+        },
+      ]),
+    ]),
+  );
+  const headers = sheet(model, "Beams").columns.map((c) => c.header);
+  expect(headers).toContain("Profile.FilletRadius [mm]");
+  expect(headers).not.toContain("Profile.FilletRadius");
+  expect(cell(model, "Beams", 0, "Profile.FilletRadius [mm]")).toBeNull();
+  expect(cell(model, "Beams", 1, "Profile.FilletRadius [mm]")).toBe(9);
+  expect(model.unitConflicts).toBe(0);
+});
+
+test("a genuinely different unit keeps the first header and is counted, never silently mixed", () => {
+  const model = buildWorkbook(
+    input([
+      element(1, "IfcBeam", "B1", [
+        REFERENCE,
+        {
+          name: "Pset_BeamCommon",
+          rows: [{ label: "Span", value: "5000 mm", raw: 5000, unit: "mm" }],
+        },
+      ]),
+      element(2, "IfcBeam", "B2", [
+        REFERENCE,
+        { name: "Pset_BeamCommon", rows: [{ label: "Span", value: "5 m", raw: 5, unit: "m" }] },
+      ]),
+    ]),
+  );
+  const headers = sheet(model, "Beams").columns.map((c) => c.header);
+  expect(headers).toContain("Pset_BeamCommon.Span [mm]");
+  expect(headers).not.toContain("Pset_BeamCommon.Span [m]");
+  expect(cell(model, "Beams", 0, "Pset_BeamCommon.Span [mm]")).toBe(5000);
+  expect(cell(model, "Beams", 1, "Pset_BeamCommon.Span [mm]")).toBe(5);
+  expect(model.unitConflicts).toBe(1);
+});
+
+test("prose in a unit-bearing column becomes an empty cell, not a SUM-breaking string", () => {
+  const model = buildWorkbook(
+    input([
+      element(1, "IfcSlab", "S1", [
+        REFERENCE,
+        {
+          name: "IfcShapeProfile",
+          rows: [
+            { label: "ProfileName", value: "P1" },
+            { label: "EnclosedArea", value: "n/a (self-intersecting outline)" },
+          ],
+        },
+      ]),
+      element(2, "IfcSlab", "S2", [
+        REFERENCE,
+        {
+          name: "IfcShapeProfile",
+          rows: [
+            { label: "ProfileName", value: "P2" },
+            { label: "EnclosedArea", value: "1.2 m²", raw: 1.2, unit: "m²" },
+          ],
+        },
+      ]),
+    ]),
+  );
+  const headers = sheet(model, "Slabs").columns.map((c) => c.header);
+  expect(headers).toContain("Profile.EnclosedArea [m²]");
+  expect(cell(model, "Slabs", 0, "Profile.EnclosedArea [m²]")).toBeNull();
+  expect(cell(model, "Slabs", 1, "Profile.EnclosedArea [m²]")).toBe(1.2);
+  // Same rule on the Profiles sheet, which materialises separately.
+  expect(cell(model, "Profiles", 0, "EnclosedArea [m²]")).toBeNull();
+  expect(cell(model, "Profiles", 1, "EnclosedArea [m²]")).toBe(1.2);
+});
+
+test("a property set whose name ends in a number is not read as a second solid", () => {
+  const model = buildWorkbook(
+    input([
+      element(1, "IfcBeam", "B1", [
+        REFERENCE,
+        { name: "Zone 2", rows: [{ label: "Reference", value: "Z2" }] },
+      ]),
+    ]),
+  );
+  expect(cell(model, "Beams", 0, "Zone 2.Reference")).toBe("Z2");
+  expect(cell(model, "Beams", 0, "SolidCount")).toBe(1);
+  expect(model.truncatedMultiSolid).toBe(0);
+});

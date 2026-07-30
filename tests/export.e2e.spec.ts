@@ -100,6 +100,46 @@ test("a double click while the save dialog is open only starts one export", asyn
   }
 });
 
+test("an element whose parameters cannot be read is reported, not silently dropped", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await readyWindow(app);
+    const bytes = [...readFileSync(FIXTURE)];
+    await page.evaluate(async (data) => {
+      await (window as any).__viewer.loadIfc(new Uint8Array(data).buffer, "i-beam.ifc");
+    }, bytes);
+
+    // Viewer.getElementParameters swallows a read failure and returns null.
+    // Simulate that for exactly one element; the export must still run and
+    // must account for the gap out loud.
+    const failed = await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      const original = viewer.getElementParameters.bind(viewer);
+      const ids: number[] = [];
+      for (const list of viewer.getCategories().values()) ids.push(...list);
+      const doomed = ids[0];
+      viewer.getElementParameters = (id: number) => (id === doomed ? null : original(id));
+      return doomed;
+    });
+    expect(typeof failed).toBe("number");
+
+    const target = path.join(mkdtempSync(path.join(tmpdir(), "export-e2e-null-")), "out.xlsx");
+    await app.evaluate(async ({ ipcMain }, filePath) => {
+      ipcMain.removeHandler("dialog:save-xlsx");
+      ipcMain.handle("dialog:save-xlsx", async () => filePath);
+    }, target);
+
+    await page.locator("#export-btn").click();
+    await expect(page.locator("#toast-host")).toContainText("1 unreadable", {
+      timeout: 30_000,
+    });
+    expect(existsSync(target)).toBe(true);
+  } finally {
+    await app.close();
+  }
+});
+
 test("cancelling the save dialog is a silent no-op", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();

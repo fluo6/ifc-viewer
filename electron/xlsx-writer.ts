@@ -1,3 +1,5 @@
+import { rename, rm } from "node:fs/promises";
+
 import ExcelJS from "exceljs";
 
 /**
@@ -8,7 +10,11 @@ import ExcelJS from "exceljs";
  * from src/, and widening rootDir would change the output layout and break
  * package.json's `main: dist-electron/main.js`. The two sides are separately
  * compiled programs talking over structured clone, so the contract is
- * structural in reality. tests/xlsx-writer.spec.ts is what enforces it.
+ * structural in reality. tests/xlsx-writer.spec.ts is what enforces it: it
+ * hands a src-typed WorkbookModel to writeWorkbook's electron-typed parameter,
+ * and `npm run typecheck` (tsconfig.test.json, the only project that includes
+ * tests/) compiles that call so a divergence is a build error rather than a
+ * runtime surprise.
  */
 
 export type CellValue = number | string | boolean | null;
@@ -28,6 +34,7 @@ export interface WorkbookModel {
   sheets: SheetModel[];
   truncatedMultiSolid: number;
   skipped: number;
+  unitConflicts: number;
 }
 
 export async function writeWorkbook(
@@ -70,5 +77,19 @@ export async function writeWorkbook(
     }
   }
 
-  await book.xlsx.writeFile(filePath);
+  // Write beside the target and rename over it, so a failure mid-write (disk
+  // full, the file open in Excel, the process dying) cannot leave a truncated
+  // workbook where a valid one used to be. The temp file is a sibling so the
+  // rename stays on one volume and is therefore atomic.
+  const tempPath = `${filePath}.${process.pid}.tmp`;
+  try {
+    await book.xlsx.writeFile(tempPath);
+    await rename(tempPath, filePath);
+  } catch (err) {
+    await rm(tempPath, { force: true }).catch(() => {
+      // Best effort: the write already failed and that is what the caller
+      // needs to hear, not a secondary complaint about the leftover.
+    });
+    throw err;
+  }
 }

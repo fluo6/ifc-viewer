@@ -33,6 +33,13 @@ test("repeated getPropertySets calls do not accumulate sets", async () => {
       const beams = categories.get("IFCBEAM") ?? [];
       const first = slabs[0];
       const second = beams[0] ?? slabs[1];
+      if (first === undefined || second === undefined) {
+        // Two distinct elements are the whole premise: the bug only shows when
+        // selection moves away and comes back.
+        throw new Error(
+          `fixture has too few elements: ${slabs.length} slabs, ${beams.length} beams`,
+        );
+      }
 
       // Two CONCURRENT first calls, before any sequential call has had a
       // chance to mark the relations index as built. A boolean guard lets
@@ -46,8 +53,8 @@ test("repeated getPropertySets calls do not accumulate sets", async () => {
       // and back again.
       const sequence = [first, first, second, first, second, first];
       const out: Array<{ id: number; names: string[] }> = [];
-      concurrent.forEach((sets: any, i: number) => {
-        out.push({ id: concurrentIds[i], names: sets.map((s: any) => s.name) });
+      concurrentIds.forEach((id, i) => {
+        out.push({ id, names: concurrent[i].map((s: any) => s.name) });
       });
       for (const id of sequence) {
         const sets = await viewer.getPropertySets(id);
@@ -61,8 +68,10 @@ test("repeated getPropertySets calls do not accumulate sets", async () => {
     }
 
     // Every call for a given element must return exactly the same sets.
-    const firstId = runs[0].id;
-    const baseline = runs[0].names;
+    const baselineRun = runs[0];
+    if (!baselineRun) throw new Error("no getPropertySets calls were recorded");
+    const firstId = baselineRun.id;
+    const baseline = baselineRun.names;
     expect(baseline.length).toBeGreaterThan(0);
 
     for (const run of runs) {

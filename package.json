@@ -35,7 +35,8 @@
     "build:electron": "tsc -p tsconfig.electron.json",
     "build": "npm run build:renderer && npm run build:electron",
     "dist": "npm run build && electron-builder",
-    "test": "npm run build && playwright test",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "test": "npm run build && npm run typecheck && playwright test",
     "check:params": "node scripts/check-parameters.mjs"
   },
   "devDependencies": {

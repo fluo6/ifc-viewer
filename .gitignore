@@ -8,3 +8,5 @@ release/
 .superpowers/
 test-results/
 playwright-report/
+# Exports land wherever the save dialog was last pointed, often the repo root.
+*.xlsx
