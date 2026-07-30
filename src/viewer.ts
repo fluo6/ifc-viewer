@@ -64,7 +64,6 @@ export class Viewer {
   private fragmentsManager!: OBC.FragmentsManager;
   private classifier!: OBC.Classifier;
   private hider!: OBC.Hider;
-  private clipper!: OBC.Clipper;
   private highlighter!: OBF.Highlighter;
   private indexer!: OBC.IfcRelationsIndexer;
   private lengthMeasurement!: OBF.LengthMeasurement;
@@ -75,7 +74,7 @@ export class Viewer {
   private currentFilename = "";
   private currentIsStreamed = false;
   private lastSelection: Selection | null = null;
-  private clipPlane: any = null;
+  private clipPlane: THREE.Plane | null = null;
   /** In-flight or settled relations indexing for the current model. */
   private relationsIndexing: Promise<void> | null = null;
 
@@ -150,8 +149,6 @@ export class Viewer {
     this.fragmentsManager = components.get(OBC.FragmentsManager);
     this.classifier = components.get(OBC.Classifier);
     this.hider = components.get(OBC.Hider);
-    this.clipper = components.get(OBC.Clipper);
-    this.clipper.enabled = false;
     this.indexer = components.get(OBC.IfcRelationsIndexer);
 
     const streamer = components.get(OBF.IfcStreamer);
@@ -475,9 +472,7 @@ export class Viewer {
     this.currentIsStreamed = false;
     this.relationsIndexing = null;
     this.lastSelection = null;
-    this.clipper.deleteAll();
-    this.clipPlane = null;
-    this.clipper.enabled = false;
+    this.setClippingPlane(false);
     this.onModelUnloaded.emit();
   }
 
@@ -496,6 +491,11 @@ export class Viewer {
   /** Renderer-level flag the clipper depends on. Exposed for regression tests. */
   debugLocalClippingEnabled(): boolean {
     return this.world.renderer!.three.localClippingEnabled;
+  }
+
+  /** Clipping planes currently registered with the renderer. For tests. */
+  debugClippingPlaneCount(): number {
+    return this.world.renderer?.three.clippingPlanes.length ?? 0;
   }
 
   /**
@@ -685,28 +685,39 @@ export class Viewer {
     return out;
   }
 
+  /**
+   * Horizontal clipping plane at `height`, hiding everything below it.
+   *
+   * Deliberately does not use OBC.Clipper. Its SimplePlane constructor builds a
+   * three TransformControls drag gizmo and then does
+   * `controls.object.children[0].children[0].add(...)`. Since three's Controls
+   * refactor, `controls.object` is the object the gizmo is *attached to* — here
+   * a helper whose single child is a plain mesh with no children — so that
+   * indexes undefined and every activation threw. (OBC also adds
+   * `controls.object` to the scene rather than `controls.getHelper()`.)
+   *
+   * We drive the plane from a slider and never need the gizmo, so we hold a
+   * plain THREE.Plane and register it with the renderer, which is the same
+   * mechanism SimplePlane's own `enabled` setter uses.
+   */
   setClippingPlane(enabled: boolean, height = 0): void {
+    const renderer = this.world.renderer;
+    if (!renderer) return;
+
     if (!enabled) {
-      this.clipper.deleteAll();
+      if (this.clipPlane) renderer.setPlane(false, this.clipPlane);
       this.clipPlane = null;
-      this.clipper.enabled = false;
       return;
     }
-    this.clipper.enabled = true;
-    if (!this.clipPlane) {
-      const normal = new THREE.Vector3(0, 1, 0);
-      const point = new THREE.Vector3(0, height, 0);
-      this.clipPlane = this.clipper.createFromNormalAndCoplanarPoint(
-        this.world,
-        normal,
-        point,
-      );
-    } else {
-      const three = this.clipPlane.three ?? this.clipPlane;
-      if (three && typeof three.constant === "number") {
-        three.constant = -height;
-      }
+
+    if (this.clipPlane) {
+      // For normal (0,1,0) the plane is y + constant = 0, so a cut at `height`
+      // is constant = -height.
+      this.clipPlane.constant = -height;
+      return;
     }
+    this.clipPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -height);
+    renderer.setPlane(true, this.clipPlane);
   }
 
   getModelHeightRange(): { min: number; max: number } | null {
