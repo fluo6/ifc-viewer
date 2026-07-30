@@ -125,6 +125,39 @@ test("the effective vertex snap radius is 50 mm, not the library default", async
   }
 });
 
+/**
+ * Every other test in this file drives measureBetween/createOnPoints, which
+ * bypasses raycasting entirely. The actual two-click UX goes through
+ * LengthMeasurement's vertex picker, which raycasts against world.meshes --
+ * so this is the one test that would have caught world.meshes never being
+ * populated. The two screen points below were confirmed empirically (by
+ * checking that a plain click there, with measure mode off, selects the
+ * beam and populates the properties panel) rather than assumed from camera
+ * framing.
+ */
+test("clicking twice on the model creates a measurement", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const box = (await page.locator("#viewport").boundingBox())!;
+    const x = box.x + box.width / 2;
+    const yTop = box.y + box.height / 2 - 100;
+    const yBottom = box.y + box.height / 2 + 100;
+
+    await page.evaluate(() => (window as any).__viewer.setMeasureMode(true));
+
+    await page.mouse.click(x, yTop);
+    await page.waitForTimeout(200);
+    await page.mouse.click(x, yBottom);
+    await page.waitForTimeout(200);
+
+    expect(await page.evaluate(() => (window as any).__viewer.measurementCount())).toBe(1);
+  } finally {
+    await app.close();
+  }
+});
+
 test("unloading a model clears measurements and exits measure mode", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();

@@ -148,6 +148,18 @@ export class Viewer {
     });
 
     this.fragmentsManager = components.get(OBC.FragmentsManager);
+    // The vertex picker behind LengthMeasurement raycasts against
+    // world.meshes, which nothing else populates — Raycasters.castRay defaults
+    // its item list to Array.from(world.meshes). Without this, clicking to
+    // measure never hits geometry. Element selection is unaffected because the
+    // highlighter raycasts fragments directly, which is why this was invisible.
+    // Subscribing here (rather than adding meshes once after load) covers the
+    // streaming loader too, which adds fragments progressively as tiles arrive.
+    this.fragmentsManager.onFragmentsLoaded.add((group) => {
+      for (const fragment of group.items) {
+        world.meshes.add(fragment.mesh);
+      }
+    });
     this.classifier = components.get(OBC.Classifier);
     this.hider = components.get(OBC.Hider);
     this.clipper = components.get(OBC.Clipper);
@@ -445,6 +457,7 @@ export class Viewer {
     } catch {
       /* ignore */
     }
+    this.world.meshes.clear();
     this.paramReader?.close();
     this.paramReader = null;
     this.streamFiles.clear();
