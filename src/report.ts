@@ -158,21 +158,39 @@ function buildProfilesSheet(elements: ElementParameters[]): SheetModel | null {
   const records = new Map<string, Map<string, CellValue>>();
 
   for (const element of elements) {
+    // Only solid 1's profile stands for this element's ProfileName; a second
+    // solid is a different section entirely (see solidIndex/baseGroupName).
     const profile = element.groups.find(
-      (g) => baseGroupName(g.name) === "IfcShapeProfile",
+      (g) => baseGroupName(g.name) === "IfcShapeProfile" && solidIndex(g.name) === 1,
     );
     if (!profile) continue;
     const nameRow = profile.rows.find((r) => r.label === "ProfileName");
     const profileName = nameRow?.value;
     if (!profileName || profileName === UNSET) continue;
-    if (records.has(profileName)) continue;
 
-    const record = new Map<string, CellValue>([["ProfileName", profileName]]);
-    const section = element.groups.find((g) =>
-      SECTION_PROPERTY_GROUP.test(baseGroupName(g.name)),
+    // Section-properties links are keyed off the profile *definition's* own
+    // expressID (profilePropsOfProfile, keyed off solid.SweptArea), not off
+    // ProfileName. Two elements can share a ProfileName while pointing at two
+    // distinct IfcIShapeProfileDef entities, only one of which carries the
+    // structural-properties link. Which element gets scanned first is an
+    // artifact of traversal order, not of which one "owns" the data, so every
+    // element sharing the name must get a chance to contribute -- merge into
+    // whatever record already exists instead of keeping only the first.
+    let record = records.get(profileName);
+    if (!record) {
+      record = new Map<string, CellValue>([["ProfileName", profileName]]);
+      records.set(profileName, record);
+    }
+
+    // A profile can carry more than one section-properties group at once
+    // (e.g. IfcStructuralProfileProperties and IfcGeneralProfileProperties
+    // both point at the same profile def), so collect all of them, not just
+    // the first. Restricted to solid 1 to match the profile group above.
+    const sections = element.groups.filter(
+      (g) => SECTION_PROPERTY_GROUP.test(baseGroupName(g.name)) && solidIndex(g.name) === 1,
     );
-    for (const group of [profile, section]) {
-      if (!group) continue;
+
+    for (const group of [profile, ...sections]) {
       for (const row of group.rows) {
         if (row.label === "ProfileName") continue;
         if (!columns.has(row.label)) {
@@ -181,10 +199,20 @@ function buildProfilesSheet(elements: ElementParameters[]): SheetModel | null {
             header: row.unit ? `${row.label} [${row.unit}]` : row.label,
           });
         }
-        record.set(row.label, cellOf(row));
+        // First non-null value per key wins: a key merely absent so far (or
+        // present but null, e.g. the reader's unset marker) is fillable by a
+        // later element, but once a real value lands it is not replaced. If
+        // two elements genuinely disagree on a value for the same
+        // ProfileName -- i.e. two distinct profile definitions that happen
+        // to share a name -- the first one scanned wins silently; that is a
+        // modelling error in the source file, not something this sheet
+        // resolves.
+        const existing = record.get(row.label);
+        if (existing === undefined || existing === null) {
+          record.set(row.label, cellOf(row));
+        }
       }
     }
-    records.set(profileName, record);
   }
 
   if (records.size === 0) return null;

@@ -323,6 +323,71 @@ test("section properties do not appear on element sheets", () => {
   expect(headers).toContain("Profile.OverallWidth [mm]");
 });
 
+const I_GENERAL: ParamGroup = {
+  name: "IfcGeneralProfileProperties",
+  rows: [
+    { label: "ProfileName", value: "200UB25.4" },
+    { label: "PhysicalWeight", value: "25.4 kg/m", raw: 25.4, unit: "kg/m" },
+  ],
+};
+
+test("a later element fills in section columns an earlier same-named element lacked", () => {
+  // B1 has no section-properties group at all; B2 shares its ProfileName and
+  // does. The first-occurrence-only bug drops MomentOfInertiaY entirely here
+  // because B1's record is created first and B2 is then skipped as a dup.
+  const model = buildWorkbook(
+    input([
+      element(1, "IfcBeam", "B1", [REFERENCE, I_PROFILE]),
+      element(2, "IfcBeam", "B2", [REFERENCE, I_PROFILE, I_SECTION]),
+    ]),
+  );
+  const profiles = sheet(model, "Profiles");
+  expect(profiles.rows).toHaveLength(1);
+  expect(cell(model, "Profiles", 0, "MomentOfInertiaY [mm⁴]")).toBe(23600000);
+});
+
+test("an element with two section-property groups contributes both to its Profiles row", () => {
+  const model = buildWorkbook(
+    input([element(1, "IfcBeam", "B1", [REFERENCE, I_PROFILE, I_SECTION, I_GENERAL])]),
+  );
+  expect(cell(model, "Profiles", 0, "MomentOfInertiaY [mm⁴]")).toBe(23600000);
+  expect(cell(model, "Profiles", 0, "PhysicalWeight [kg/m]")).toBe(25.4);
+});
+
+test("a second solid's section-property group does not leak into solid 1's Profiles row", () => {
+  const model = buildWorkbook(
+    input([
+      element(1, "IfcBeam", "B1", [
+        REFERENCE,
+        I_PROFILE,
+        I_SECTION,
+        { name: "IfcShapeProfile 2", rows: [{ label: "ProfileName", value: "200UB25.4" }] },
+        {
+          name: "IfcStructuralProfileProperties 2",
+          rows: [
+            { label: "ProfileName", value: "200UB25.4" },
+            { label: "TorsionalConstantX", value: "999 mm⁴", raw: 999, unit: "mm⁴" },
+          ],
+        },
+      ]),
+    ]),
+  );
+  expect(cell(model, "Profiles", 0, "MomentOfInertiaY [mm⁴]")).toBe(23600000);
+  const headers = sheet(model, "Profiles").columns.map((c) => c.header);
+  expect(headers).not.toContain("TorsionalConstantX [mm⁴]");
+});
+
+test("Profiles has exactly one row per unique ProfileName across many sharing elements", () => {
+  const model = buildWorkbook(
+    input([
+      element(1, "IfcBeam", "B1", [REFERENCE, I_PROFILE]),
+      element(2, "IfcBeam", "B2", [REFERENCE, I_PROFILE]),
+      element(3, "IfcBeam", "B3", [REFERENCE, I_PROFILE]),
+    ]),
+  );
+  expect(sheet(model, "Profiles").rows).toHaveLength(1);
+});
+
 test("Model sheet records provenance", () => {
   const model = buildWorkbook(
     input([element(1, "IfcBeam", "B1", [REFERENCE]), element(2, "IfcWall", "W1", [REFERENCE])]),
