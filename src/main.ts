@@ -5,6 +5,7 @@ import { mountProperties } from "./ui/properties";
 import { mountCategories } from "./ui/categories";
 import { mountClipper } from "./ui/clipper";
 import { mountKeybindings } from "./ui/keybindings";
+import { mountExport } from "./ui/export";
 
 const viewport = document.getElementById("viewport")!;
 const viewer = new Viewer();
@@ -24,6 +25,7 @@ void (async () => {
   }
   mountDropzone(viewer);
   mountToolbar(viewer);
+  mountExport(viewer);
   mountProperties(viewer);
   mountCategories(viewer);
   mountClipper(viewer);
