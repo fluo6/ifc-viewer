@@ -158,6 +158,40 @@ test("clicking twice on the model creates a measurement", async () => {
   }
 });
 
+/**
+ * Regression test: loadIfc is the normal way to switch models (both
+ * dropzone.ts and toolbar.ts call it directly, with no separate unload step),
+ * and a second load in the same session previously left world.meshes empty
+ * forever -- the vertex picker behind click-to-measure raycasts against
+ * world.meshes, so clicking to measure silently died after the first model.
+ * Same two screen points as "clicking twice on the model creates a
+ * measurement" above, confirmed there to hit geometry.
+ */
+test("clicking twice on the model creates a measurement after a second load", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    await loaded(app);
+    const page = await loaded(app); // second load, same session, no explicit unload
+
+    const box = (await page.locator("#viewport").boundingBox())!;
+    const x = box.x + box.width / 2;
+    const yTop = box.y + box.height / 2 - 100;
+    const yBottom = box.y + box.height / 2 + 100;
+
+    await page.evaluate(() => (window as any).__viewer.setMeasureMode(true));
+
+    await page.mouse.click(x, yTop);
+    await page.waitForTimeout(200);
+    await page.mouse.click(x, yBottom);
+    await page.waitForTimeout(200);
+
+    expect(await page.evaluate(() => (window as any).__viewer.measurementCount())).toBe(1);
+  } finally {
+    await app.close();
+  }
+});
+
 test("unloading a model clears measurements and exits measure mode", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();

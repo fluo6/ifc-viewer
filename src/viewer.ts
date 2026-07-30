@@ -148,18 +148,6 @@ export class Viewer {
     });
 
     this.fragmentsManager = components.get(OBC.FragmentsManager);
-    // The vertex picker behind LengthMeasurement raycasts against
-    // world.meshes, which nothing else populates — Raycasters.castRay defaults
-    // its item list to Array.from(world.meshes). Without this, clicking to
-    // measure never hits geometry. Element selection is unaffected because the
-    // highlighter raycasts fragments directly, which is why this was invisible.
-    // Subscribing here (rather than adding meshes once after load) covers the
-    // streaming loader too, which adds fragments progressively as tiles arrive.
-    this.fragmentsManager.onFragmentsLoaded.add((group) => {
-      for (const fragment of group.items) {
-        world.meshes.add(fragment.mesh);
-      }
-    });
     this.classifier = components.get(OBC.Classifier);
     this.hider = components.get(OBC.Hider);
     this.clipper = components.get(OBC.Clipper);
@@ -272,6 +260,16 @@ export class Viewer {
     if (this.currentModel) this.unloadIfc();
 
     this.world.scene.three.add(model);
+    // The vertex picker behind LengthMeasurement raycasts against world.meshes
+    // (Raycasters.castRay defaults its item list to Array.from(world.meshes)),
+    // and nothing else populates it on this path. It must happen after the
+    // unload above, which clears the set -- populating earlier, e.g. from
+    // FragmentsManager.onFragmentsLoaded, gets wiped by the unload of the
+    // previous model. The streaming path needs nothing here: IfcStreamer adds
+    // each tile's mesh itself as it arrives.
+    for (const fragment of model.items) {
+      this.world.meshes.add(fragment.mesh);
+    }
     this.currentModel = model;
     this.currentFilename = name;
     this.currentIsStreamed = false;
