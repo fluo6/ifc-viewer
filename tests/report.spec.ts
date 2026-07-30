@@ -269,3 +269,75 @@ test("one sheet per class, named in plural", () => {
   expect(names).toContain("Columns");
   expect(names).toContain("Walls");
 });
+
+const I_PROFILE: ParamGroup = {
+  name: "IfcShapeProfile",
+  rows: [
+    { label: "ProfileName", value: "200UB25.4" },
+    { label: "OverallWidth", value: "133 mm", raw: 133, unit: "mm" },
+    { label: "ProfileDef", value: "IfcIShapeProfileDef" },
+  ],
+};
+
+const I_SECTION: ParamGroup = {
+  name: "IfcStructuralProfileProperties",
+  rows: [
+    { label: "ProfileName", value: "200UB25.4" },
+    { label: "MomentOfInertiaY", value: "23600000 mm⁴", raw: 23600000, unit: "mm⁴" },
+  ],
+};
+
+test("section properties are normalised onto Profiles, one row per section", () => {
+  const model = buildWorkbook(
+    input([
+      element(1, "IfcBeam", "B1", [REFERENCE, I_PROFILE, I_SECTION]),
+      element(2, "IfcBeam", "B2", [REFERENCE, I_PROFILE, I_SECTION]),
+      element(3, "IfcBeam", "B3", [
+        REFERENCE,
+        {
+          name: "IfcShapeProfile",
+          rows: [
+            { label: "ProfileName", value: "CHS168" },
+            { label: "Radius", value: "84 mm", raw: 84, unit: "mm" },
+          ],
+        },
+      ]),
+    ]),
+  );
+  const profiles = sheet(model, "Profiles");
+  expect(profiles.rows).toHaveLength(2);
+  expect(cell(model, "Profiles", 0, "ProfileName")).toBe("200UB25.4");
+  expect(cell(model, "Profiles", 0, "MomentOfInertiaY [mm⁴]")).toBe(23600000);
+  expect(cell(model, "Profiles", 1, "ProfileName")).toBe("CHS168");
+});
+
+test("section properties do not appear on element sheets", () => {
+  const model = buildWorkbook(
+    input([element(1, "IfcBeam", "B1", [REFERENCE, I_PROFILE, I_SECTION])]),
+  );
+  const headers = sheet(model, "Beams").columns.map((c) => c.header);
+  expect(headers).not.toContain("MomentOfInertiaY [mm⁴]");
+  expect(headers).not.toContain("IfcStructuralProfileProperties.MomentOfInertiaY [mm⁴]");
+  // Dimensions stay inline deliberately -- scanning a schedule for depth is the
+  // common case and a VLOOKUP for it would be hostile.
+  expect(headers).toContain("Profile.OverallWidth [mm]");
+});
+
+test("Model sheet records provenance", () => {
+  const model = buildWorkbook(
+    input([element(1, "IfcBeam", "B1", [REFERENCE]), element(2, "IfcWall", "W1", [REFERENCE])]),
+  );
+  const rows = sheet(model, "Model").rows;
+  const asMap = new Map(rows.map((r) => [String(r[0]), r[1]]));
+  expect(asMap.get("Source file")).toBe("m.ifc");
+  expect(asMap.get("IFC schema")).toBe("IFC2X3");
+  expect(asMap.get("Native length unit")).toBe("mm");
+  expect(asMap.get("Total elements")).toBe(2);
+  expect(asMap.get("Beams")).toBe(1);
+  expect(asMap.get("Walls")).toBe(1);
+});
+
+test("Profiles is omitted when nothing has a profile", () => {
+  const model = buildWorkbook(input([element(1, "IfcBeam", "B1", [REFERENCE])]));
+  expect(model.sheets.map((s) => s.name)).not.toContain("Profiles");
+});

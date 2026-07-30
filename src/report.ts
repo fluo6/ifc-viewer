@@ -146,7 +146,90 @@ interface SheetAccumulator {
   records: Array<Map<string, CellValue>>;
 }
 
-export function buildWorkbook(input: ReportInput): WorkbookModel {
+/**
+ * One row per unique section. Section properties belong to the profile, not the
+ * element -- repeating MomentOfInertiaY across 501 beams is both bloat and a
+ * misstatement of where the data lives. Elements join on Profile.ProfileName.
+ */
+function buildProfilesSheet(elements: ElementParameters[]): SheetModel | null {
+  const columns = new Map<string, ColumnDef>([
+    ["ProfileName", { key: "ProfileName", header: "ProfileName" }],
+  ]);
+  const records = new Map<string, Map<string, CellValue>>();
+
+  for (const element of elements) {
+    const profile = element.groups.find(
+      (g) => baseGroupName(g.name) === "IfcShapeProfile",
+    );
+    if (!profile) continue;
+    const nameRow = profile.rows.find((r) => r.label === "ProfileName");
+    const profileName = nameRow?.value;
+    if (!profileName || profileName === UNSET) continue;
+    if (records.has(profileName)) continue;
+
+    const record = new Map<string, CellValue>([["ProfileName", profileName]]);
+    const section = element.groups.find((g) =>
+      SECTION_PROPERTY_GROUP.test(baseGroupName(g.name)),
+    );
+    for (const group of [profile, section]) {
+      if (!group) continue;
+      for (const row of group.rows) {
+        if (row.label === "ProfileName") continue;
+        if (!columns.has(row.label)) {
+          columns.set(row.label, {
+            key: row.label,
+            header: row.unit ? `${row.label} [${row.unit}]` : row.label,
+          });
+        }
+        record.set(row.label, cellOf(row));
+      }
+    }
+    records.set(profileName, record);
+  }
+
+  if (records.size === 0) return null;
+  const cols = [...columns.values()];
+  return {
+    name: "Profiles",
+    columns: cols,
+    rows: [...records.values()].map((record) =>
+      cols.map((col) => record.get(col.key) ?? null),
+    ),
+  };
+}
+
+/** Key/value provenance, so a stray workbook is self-describing later. */
+function buildModelSheet(
+  input: ReportInput,
+  sheets: SheetModel[],
+  exportedAt: string,
+): SheetModel {
+  const rows: CellValue[][] = [
+    ["Source file", input.filename],
+    ["IFC schema", input.schema],
+    ["Native length unit", input.lengthUnit],
+    ["Native unit in mm", input.lengthToMetres * 1000],
+    ["Displayed length unit", "mm"],
+    ["Total elements", input.elements.length],
+  ];
+  for (const sheet of sheets) {
+    rows.push([sheet.name, sheet.rows.length]);
+  }
+  rows.push(["Exported at", exportedAt]);
+  return {
+    name: "Model",
+    columns: [
+      { key: "Property", header: "Property" },
+      { key: "Value", header: "Value" },
+    ],
+    rows,
+  };
+}
+
+export function buildWorkbook(
+  input: ReportInput,
+  exportedAt = "",
+): WorkbookModel {
   const accumulators = new Map<string, SheetAccumulator>();
   let truncatedMultiSolid = 0;
   let skipped = 0;
@@ -231,6 +314,10 @@ export function buildWorkbook(input: ReportInput): WorkbookModel {
     );
     sheets.push({ name: acc.name, columns, rows });
   }
+
+  const profiles = buildProfilesSheet(input.elements);
+  if (profiles) sheets.push(profiles);
+  sheets.push(buildModelSheet(input, sheets, exportedAt));
 
   return { sheets, truncatedMultiSolid, skipped };
 }
