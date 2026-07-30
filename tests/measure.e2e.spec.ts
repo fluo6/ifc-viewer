@@ -49,23 +49,49 @@ test("a sub-metre measurement still reads in whole millimetres", async () => {
   }
 });
 
-test("measure mode suspends element selection and restores it", async () => {
+/**
+ * Three phases at a point already confirmed to hit geometry (same screen
+ * coordinates as "clicking twice on the model creates a measurement" below):
+ * off → click selects (the positive control, so phase 2's non-selection can't
+ * be explained by the click simply missing geometry), on → click does not
+ * select, off again → click selects again. Without the positive control and
+ * the final off-phase, moving `highlighter.enabled = !on` inside the
+ * `if (on)` block would break selection permanently after the first
+ * measurement and every test here would stay green.
+ */
+test("measure mode suspends element selection and restores it on exit", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
     const page = await loaded(app);
+    const box = (await page.locator("#viewport").boundingBox())!;
+    const x = box.x + box.width / 2;
+    const yTop = box.y + box.height / 2 - 100;
 
+    // Phase 1 -- measure mode off: a plain click selects (positive control).
+    expect(await page.evaluate(() => (window as any).__viewer.isMeasureMode())).toBe(false);
+    await page.mouse.click(x, yTop);
+    await page.waitForTimeout(300);
+    await expect(page.locator("#properties")).toContainText("IfcShapeProfile");
+
+    // Phase 2 -- measure mode on: clear the prior selection first so the
+    // "does not select" assertion below can't just be observing phase 1's
+    // leftover selection still being shown.
+    await page.evaluate(() => (window as any).__viewer.onSelection.emit(null));
+    await expect(page.locator("#properties")).toContainText("Click an element to inspect");
     await page.evaluate(() => (window as any).__viewer.setMeasureMode(true));
     expect(await page.evaluate(() => (window as any).__viewer.isMeasureMode())).toBe(true);
-
-    // A real click on the canvas must not select while measuring.
-    const box = (await page.locator("#viewport").boundingBox())!;
-    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.click(x, yTop);
     await page.waitForTimeout(300);
     await expect(page.locator("#properties")).toContainText("Click an element to inspect");
 
+    // Phase 3 -- measure mode off again: selection must be restored, not
+    // permanently suspended.
     await page.evaluate(() => (window as any).__viewer.setMeasureMode(false));
     expect(await page.evaluate(() => (window as any).__viewer.isMeasureMode())).toBe(false);
+    await page.mouse.click(x, yTop);
+    await page.waitForTimeout(300);
+    await expect(page.locator("#properties")).toContainText("IfcShapeProfile");
   } finally {
     await app.close();
   }
@@ -126,6 +152,66 @@ test("the effective vertex snap radius is 50 mm, not the library default", async
 });
 
 /**
+ * The browser fires `click` after mouseup regardless of how far the pointer
+ * travelled between mousedown and mouseup -- so orbiting the camera (press,
+ * drag, release, all over the canvas) dispatches a click same as a real
+ * click would. Without a movement threshold that phantom click anchors a
+ * measurement point the user never intended, and every later click is off
+ * by one.
+ *
+ * measurementCount() alone can't tell this apart from an ordinary click: a
+ * single anchored point doesn't complete a measurement either way, so the
+ * count reads 0 in both the buggy and fixed cases. Worse, a real orbit drag
+ * this large actually rotates the camera enough that the release point often
+ * no longer raycasts onto the model at all (confirmed empirically -- with the
+ * fix reverted, whether a phantom point gets anchored here is a coin flip
+ * across runs, purely a function of where the camera ends up), which would
+ * make an outcome-based assertion flaky no matter which coordinates are
+ * picked. So this spies directly on Viewer.placeMeasurePoint -- the one call
+ * ruler.ts's click handler is or isn't allowed to make -- which is exactly
+ * the mechanism the fix gates, independent of whatever the camera happens to
+ * be looking at afterwards.
+ */
+test("orbiting the camera in measure mode does not anchor a measurement point", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    await page.evaluate(() => (window as any).__viewer.setMeasureMode(true));
+
+    await page.evaluate(() => {
+      const v: any = (window as any).__viewer;
+      (window as any).__placeCalls = 0;
+      const original = v.placeMeasurePoint.bind(v);
+      v.placeMeasurePoint = () => {
+        (window as any).__placeCalls++;
+        return original();
+      };
+    });
+
+    const box = (await page.locator("#viewport").boundingBox())!;
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + 300, y, { steps: 10 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+
+    expect(await page.evaluate(() => (window as any).__placeCalls)).toBe(0);
+    expect(await page.evaluate(() => (window as any).__viewer.measurementCount())).toBe(0);
+
+    // A genuine click (no preceding drag) must still place a point normally.
+    await page.mouse.click(x, y);
+    await page.waitForTimeout(200);
+    expect(await page.evaluate(() => (window as any).__placeCalls)).toBe(1);
+  } finally {
+    await app.close();
+  }
+});
+
+/**
  * Every other test in this file drives measureBetween/createOnPoints, which
  * bypasses raycasting entirely. The actual two-click UX goes through
  * LengthMeasurement's vertex picker, which raycasts against world.meshes --
@@ -153,6 +239,27 @@ test("clicking twice on the model creates a measurement", async () => {
     await page.waitForTimeout(200);
 
     expect(await page.evaluate(() => (window as any).__viewer.measurementCount())).toBe(1);
+
+    // Pin the unit chain end to end through a real click, not just
+    // measureBetween with metre literals. The fixture is a single 5000 mm
+    // beam, 203 mm deep, so any real chord across it lands well within
+    // [50, 6000] -- a 1000x error in either direction (metres left
+    // unconverted, or millimetres converted twice) would land far outside.
+    // The exact figure is camera-dependent (the chord is between two
+    // arbitrary surface points) and would be flaky to pin exactly.
+    const label = await page.evaluate(() => {
+      const viewport = document.getElementById("viewport")!;
+      const divs = Array.from(viewport.querySelectorAll("div"));
+      for (const d of divs) {
+        const t = d.textContent?.trim() ?? "";
+        if (/^\d+\s*mm$/.test(t) && d.children.length === 0) return t;
+      }
+      return null;
+    });
+    expect(label).toMatch(/^\s*\d+\s*mm\s*$/);
+    const mm = Number(label!.match(/\d+/)![0]);
+    expect(mm).toBeGreaterThanOrEqual(50);
+    expect(mm).toBeLessThanOrEqual(6000);
   } finally {
     await app.close();
   }

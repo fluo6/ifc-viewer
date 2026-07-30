@@ -62,15 +62,17 @@ Fragment geometry is in metres; the properties panel displays mm. The ruler
 matches the panel via `SimpleDimensionLine`'s statics:
 
 ```ts
-SimpleDimensionLine.scale = 1000;   // metres -> mm
+SimpleDimensionLine.scale = 0.001;  // metres -> mm
 SimpleDimensionLine.units = "mm";
 SimpleDimensionLine.rounding = 0;
 ```
 
-The inferred semantics — label text is `length × scale`, to `rounding` decimals,
-with `units` appended — must be confirmed against the built code as the first
-implementation step. If `scale` turns out to mean something else, the label is
-built from `SimpleDimensionLine.units` plus our own conversion instead.
+Confirmed against the built library (`getTextContent()` in
+`@thatopen/components-front`'s dist bundle): the label text is
+`(length / scale).toFixed(rounding)` with `units` appended — `scale` **divides**,
+it does not multiply. `1000` was the wrong guess: geometry is in metres, so
+dividing a 5 m span by `1000` renders `"0 mm"`. `0.001` is the value that
+actually yields millimetres.
 
 `snapDistance` is set to `0.05` (50 mm), not the default `0.25` (250 mm), which
 is far too grabby at building scale. This is a starting value to be tuned against
@@ -94,7 +96,9 @@ setMeasureMode(on: boolean): void;   // the only place that knows measuring and
 placeMeasurePoint(): void;           // -> lengthMeasurement.create()
 clearMeasurements(): void;           // -> deleteAll()
 isMeasureMode(): boolean;
-measureBetween(a: THREE.Vector3, b: THREE.Vector3): void;  // -> createOnPoints
+measureBetween(a: Point3, b: Point3): void;  // -> createOnPoints; Point3 is a
+                                             // plain {x,y,z}, not THREE.Vector3
+                                             // -- src/ui/ never imports three
 ```
 
 `setMeasureMode` flips `highlighter.enabled` inversely and clears the current
@@ -152,8 +156,9 @@ Measurements accumulate until cleared.
    verify and the highest-consequence failure.
 2. **Renderer swap regressions.** Clipping and highlighting must be re-tested,
    subclass or not.
-3. **`scale` / `units` / `rounding` semantics** are inferred, not documented.
-   Confirm before relying on them.
+3. **`scale` / `units` / `rounding` semantics.** Confirmed against the built
+   library: `scale` divides, so `0.001` (not `1000`) is what yields
+   millimetres. See "Units" above.
 4. **Streamed models (>50 MB).** Snapping only sees currently-streamed
    fragments, so it can miss geometry that has not loaded. Documented, not fixed.
 5. **`snapDistance` tuning.** 50 mm is a guess informed by scale; it needs a pass

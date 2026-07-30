@@ -20,13 +20,37 @@ export function mountRuler(viewer: Viewer): void {
   // children of #viewport, so listening there would drop a measurement point
   // every time the user clicked this bar's own buttons.
   const canvas = document.querySelector("#viewport canvas");
-  canvas?.addEventListener("click", () => {
+  const viewport = document.getElementById("viewport");
+
+  // Orbiting fires a click too: press, drag, release on the canvas all dispatch
+  // click, so without a movement threshold an orbit drops a phantom point and
+  // every later click is off by one. OBF.Highlighter guards the same case with
+  // the same 5px threshold.
+  const DRAG_THRESHOLD_PX = 5;
+  let pressedAt: { x: number; y: number } | null = null;
+
+  canvas?.addEventListener("pointerdown", (e) => {
+    const ev = e as PointerEvent;
+    pressedAt = { x: ev.clientX, y: ev.clientY };
+  });
+
+  canvas?.addEventListener("click", (e) => {
+    const ev = e as MouseEvent;
+    const from = pressedAt;
+    pressedAt = null;
+    if (!viewer.isMeasureMode()) return;
+    if (from) {
+      const dx = ev.clientX - from.x;
+      const dy = ev.clientY - from.y;
+      if (Math.hypot(dx, dy) > DRAG_THRESHOLD_PX) return;
+    }
     viewer.placeMeasurePoint();
     render();
   });
 
   function render() {
     const on = viewer.isMeasureMode();
+    viewport?.classList.toggle("measuring", on);
     root.innerHTML = "";
 
     const toggle = document.createElement("button");

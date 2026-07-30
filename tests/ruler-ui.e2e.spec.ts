@@ -92,6 +92,29 @@ test("Clear appears only when measurements exist and removes them", async () => 
   }
 });
 
+test("the canvas shows a crosshair cursor only while measuring", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const cursor = () =>
+      page.evaluate(() => {
+        const canvas = document.querySelector("#viewport canvas")!;
+        return getComputedStyle(canvas).cursor;
+      });
+
+    expect(await cursor()).not.toBe("crosshair");
+
+    await page.locator("#ruler-toggle").click();
+    expect(await cursor()).toBe("crosshair");
+
+    await page.locator("#ruler-toggle").click();
+    expect(await cursor()).not.toBe("crosshair");
+  } finally {
+    await app.close();
+  }
+});
+
 test("clicking the ruler bar itself does not place a measurement point", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();

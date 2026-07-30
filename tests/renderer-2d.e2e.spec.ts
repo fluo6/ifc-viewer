@@ -53,7 +53,7 @@ test("the 2D label layer exists and does not intercept pointer events", async ()
   }
 });
 
-test("selection and clipping still work with the 2D renderer in place", async () => {
+test("selection still works, and the renderer subclass still enables local clipping, with the 2D renderer in place", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {

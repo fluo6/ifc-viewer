@@ -77,6 +77,9 @@ body {
 
 #viewport canvas { display: block; width: 100%; height: 100%; }
 
+/* Only affordance on the canvas itself that measure mode is active. */
+#viewport.measuring canvas { cursor: crosshair; }
+
 #dropzone {
   position: absolute; inset: 0;
   pointer-events: none;

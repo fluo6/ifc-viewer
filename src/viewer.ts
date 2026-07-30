@@ -205,9 +205,19 @@ export class Viewer {
     // config is the only thing that changes the actual pick radius. The field
     // is set too, so the component doesn't misreport its own setting.
     lengthMeasurement.snapDistance = SNAP_DISTANCE_METRES;
-    (
-      lengthMeasurement as unknown as { _vertexPicker: { config: unknown } }
-    )._vertexPicker.config = { snapDistance: SNAP_DISTANCE_METRES };
+    const pickerConfig = this.getVertexPickerConfig(lengthMeasurement);
+    if (pickerConfig) {
+      pickerConfig.snapDistance = SNAP_DISTANCE_METRES;
+    } else {
+      // @thatopen/components-front is pinned to ^2.4.0, so a minor bump could
+      // rename or restructure this private field. Degrade to the library's
+      // own default snap radius rather than throwing out of init() -- which
+      // would replace the whole document with the "3D engine failed to
+      // initialize" screen (see main.ts) over an optional tweak.
+      console.warn(
+        "LengthMeasurement._vertexPicker.config not found; snap radius left at the library default",
+      );
+    }
 
     // SimpleDimensionLine renders `length / scale` with `rounding` decimals.
     // Geometry is in metres, so 0.001 yields millimetres — matching the
@@ -488,13 +498,26 @@ export class Viewer {
     return this.world.renderer!.three.localClippingEnabled;
   }
 
+  /**
+   * Reaches into LengthMeasurement's private VertexPicker config -- see the
+   * note in init() on why the public snapDistance field alone isn't enough.
+   * Returns null instead of throwing if the private shape has changed under
+   * us, so callers can degrade instead of crashing.
+   */
+  private getVertexPickerConfig(
+    lengthMeasurement: OBF.LengthMeasurement,
+  ): { snapDistance: number } | null {
+    const picker = (
+      lengthMeasurement as unknown as {
+        _vertexPicker?: { config?: { snapDistance: number } };
+      }
+    )._vertexPicker;
+    return picker?.config ?? null;
+  }
+
   /** Effective vertex-snap radius in metres. Exposed for regression tests. */
   debugSnapDistance(): number {
-    return (
-      this.lengthMeasurement as unknown as {
-        _vertexPicker: { config: { snapDistance: number } };
-      }
-    )._vertexPicker.config.snapDistance;
+    return this.getVertexPickerConfig(this.lengthMeasurement)?.snapDistance ?? NaN;
   }
 
   /**
