@@ -101,6 +101,16 @@ body {
   display: flex; align-items: center; gap: 8px;
 }
 
+#ruler {
+  position: absolute; bottom: 52px; left: 12px;
+  background: rgba(22,27,34,0.92);
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  display: flex; align-items: center; gap: 8px;
+}
+
 #toast-host {
   position: fixed; bottom: 16px; right: 16px;
   display: flex; flex-direction: column; gap: 8px;

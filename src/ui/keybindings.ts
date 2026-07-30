@@ -17,6 +17,9 @@ export function mountKeybindings(viewer: Viewer): void {
     } else if (e.key === "r" || e.key === "R") {
       e.preventDefault();
       viewer.resetCamera();
+    } else if (e.key === "m" || e.key === "M") {
+      e.preventDefault();
+      viewer.setMeasureMode(!viewer.isMeasureMode());
     }
   });
 }

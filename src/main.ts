@@ -4,6 +4,7 @@ import { mountToolbar } from "./ui/toolbar";
 import { mountProperties } from "./ui/properties";
 import { mountCategories } from "./ui/categories";
 import { mountClipper } from "./ui/clipper";
+import { mountRuler } from "./ui/ruler";
 import { mountKeybindings } from "./ui/keybindings";
 import { mountExport } from "./ui/export";
 
@@ -29,6 +30,7 @@ void (async () => {
   mountProperties(viewer);
   mountCategories(viewer);
   mountClipper(viewer);
+  mountRuler(viewer);
   mountKeybindings(viewer);
   console.log("viewer ready");
 })();
