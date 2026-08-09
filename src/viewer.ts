@@ -51,6 +51,7 @@ export class Viewer {
   readonly onSelection = new Emitter<Selection | null>();
   readonly onLoadProgress = new Emitter<LoadProgress>();
   readonly onMeasureModeChanged = new Emitter<boolean>();
+  readonly onMeasureSnapChanged = new Emitter<boolean>();
 
   private components!: OBC.Components;
   private world!: OBC.SimpleWorld<
@@ -68,6 +69,7 @@ export class Viewer {
   private indexer!: OBC.IfcRelationsIndexer;
   private lengthMeasurement!: OBF.LengthMeasurement;
   private measureMode = false;
+  private measureSnapActive = false;
 
   private currentModel: FRAGS.FragmentsGroup | null = null;
   private currentCategories = new Map<string, ElementId[]>();
@@ -205,6 +207,7 @@ export class Viewer {
     const pickerConfig = this.getVertexPickerConfig(lengthMeasurement);
     if (pickerConfig) {
       pickerConfig.snapDistance = SNAP_DISTANCE_METRES;
+      pickerConfig.showOnlyVertex = false;
     } else {
       // @thatopen/components-front is pinned to ^2.4.0, so a minor bump could
       // rename or restructure this private field. Degrade to the library's
@@ -215,6 +218,9 @@ export class Viewer {
         "LengthMeasurement._vertexPicker.config not found; snap radius left at the library default",
       );
     }
+    const picker = this.getVertexPicker(lengthMeasurement);
+    picker?.onVertexFound.add(() => this.setMeasureSnapActive(true));
+    picker?.onVertexLost.add(() => this.setMeasureSnapActive(false));
 
     // SimpleDimensionLine renders `length / scale` with `rounding` decimals.
     // Geometry is in metres, so 0.001 yields millimetres — matching the
@@ -365,9 +371,8 @@ export class Viewer {
       }
     }
 
-    if (this.currentModel) this.unloadIfc();
-
     // Hand the tiles to the streamer via our in-memory file map.
+    const previousStreamFiles = this.streamFiles;
     this.streamFiles = tileFiles;
 
     const settings = {
@@ -380,10 +385,19 @@ export class Viewer {
     try {
       model = await this.streamer.load(settings, true);
     } catch (err) {
-      this.streamFiles.clear();
+      this.streamFiles = previousStreamFiles;
       throw new Error(`Stream-load failed: ${(err as Error).message}`);
     }
 
+    if (this.currentModel) {
+      this.streamFiles = previousStreamFiles;
+      this.unloadIfc();
+      this.streamFiles = tileFiles;
+    }
+
+    for (const fragment of model.items) {
+      this.world.meshes.add(fragment.mesh);
+    }
     this.currentModel = model;
     this.currentFilename = name;
     this.currentIsStreamed = true;
@@ -506,18 +520,37 @@ export class Viewer {
    */
   private getVertexPickerConfig(
     lengthMeasurement: OBF.LengthMeasurement,
-  ): { snapDistance: number } | null {
-    const picker = (
-      lengthMeasurement as unknown as {
-        _vertexPicker?: { config?: { snapDistance: number } };
-      }
-    )._vertexPicker;
+  ): { snapDistance: number; showOnlyVertex?: boolean } | null {
+    const picker = this.getVertexPicker(lengthMeasurement);
     return picker?.config ?? null;
+  }
+
+  private getVertexPicker(
+    lengthMeasurement: OBF.LengthMeasurement,
+  ): {
+    config?: { snapDistance: number; showOnlyVertex?: boolean };
+    onVertexFound: { add: (callback: () => void) => void };
+    onVertexLost: { add: (callback: () => void) => void };
+  } | null {
+    return (
+      lengthMeasurement as unknown as {
+        _vertexPicker?: {
+          config?: { snapDistance: number; showOnlyVertex?: boolean };
+          onVertexFound: { add: (callback: () => void) => void };
+          onVertexLost: { add: (callback: () => void) => void };
+        };
+      }
+    )._vertexPicker ?? null;
   }
 
   /** Effective vertex-snap radius in metres. Exposed for regression tests. */
   debugSnapDistance(): number {
     return this.getVertexPickerConfig(this.lengthMeasurement)?.snapDistance ?? NaN;
+  }
+
+  /** Whether the live ruler cursor is currently snapped to a vertex. */
+  isMeasureSnapActive(): boolean {
+    return this.measureSnapActive;
   }
 
   /**
@@ -547,6 +580,7 @@ export class Viewer {
     this.measureMode = on;
     this.lengthMeasurement.enabled = on;
     this.highlighter.enabled = !on;
+    this.setMeasureSnapActive(false);
     if (on) {
       try {
         this.highlighter.clear();
@@ -561,6 +595,12 @@ export class Viewer {
 
   isMeasureMode(): boolean {
     return this.measureMode;
+  }
+
+  private setMeasureSnapActive(active: boolean): void {
+    if (this.measureSnapActive === active) return;
+    this.measureSnapActive = active;
+    this.onMeasureSnapChanged.emit(active);
   }
 
   /**
@@ -686,7 +726,7 @@ export class Viewer {
   }
 
   /**
-   * Horizontal clipping plane at `height`, hiding everything below it.
+   * Horizontal clipping plane at `height`, hiding everything above it.
    *
    * Deliberately does not use OBC.Clipper. Its SimplePlane constructor builds a
    * three TransformControls drag gizmo and then does
@@ -711,12 +751,12 @@ export class Viewer {
     }
 
     if (this.clipPlane) {
-      // For normal (0,1,0) the plane is y + constant = 0, so a cut at `height`
-      // is constant = -height.
-      this.clipPlane.constant = -height;
+      // For normal (0,-1,0) the plane is -y + constant = 0, so a cut at
+      // `height` is constant = height.
+      this.clipPlane.constant = height;
       return;
     }
-    this.clipPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -height);
+    this.clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), height);
     renderer.setPlane(true, this.clipPlane);
   }
 

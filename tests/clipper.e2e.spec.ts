@@ -124,6 +124,38 @@ test("moving the plane clips at a different height", async () => {
   }
 });
 
+test("a clipping plane above the model leaves the model visible", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const viewport = page.locator("#viewport");
+
+    const baseline = await viewport.screenshot();
+    await page.waitForTimeout(500);
+    const baselineAgain = await viewport.screenshot();
+    expect(
+      baseline.equals(baselineAgain),
+      "render is not deterministic between frames, so the clip direction comparison cannot conclude",
+    ).toBe(true);
+
+    await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      const range = viewer.getModelHeightRange();
+      viewer.setClippingPlane(true, range.max + (range.max - range.min) * 0.01);
+    });
+    await page.waitForTimeout(500);
+    const aboveTop = await viewport.screenshot();
+
+    expect(
+      aboveTop.equals(baseline),
+      "a plane above the model clipped visible geometry; the clip direction is inverted",
+    ).toBe(true);
+  } finally {
+    await app.close();
+  }
+});
+
 test("unloading the model clears the clipping plane", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();

@@ -15,6 +15,7 @@ export function mountRuler(viewer: Viewer): void {
 
   // Keeps the bar in step however the mode was changed — button or `m` key.
   viewer.onMeasureModeChanged.on(render);
+  viewer.onMeasureSnapChanged.on(render);
 
   // The canvas, not #viewport: the dropzone, clipper and ruler overlays are all
   // children of #viewport, so listening there would drop a measurement point
@@ -63,7 +64,9 @@ export function mountRuler(viewer: Viewer): void {
     if (on) {
       const hint = document.createElement("span");
       hint.className = "muted";
-      hint.textContent = "click two points · Esc cancels";
+      hint.textContent = `click two points · snap: ${
+        viewer.isMeasureSnapActive() ? "vertex" : "face"
+      } · Esc cancels`;
       root.appendChild(hint);
     }
 

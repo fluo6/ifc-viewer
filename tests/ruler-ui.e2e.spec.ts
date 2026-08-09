@@ -47,6 +47,7 @@ test("the toggle drives measure mode and reflects its state", async () => {
     await expect(toggle).toHaveText("Measure: ON");
     expect(await page.evaluate(() => (window as any).__viewer.isMeasureMode())).toBe(true);
     await expect(page.locator("#ruler")).toContainText("Esc cancels");
+    await expect(page.locator("#ruler")).toContainText("snap: face");
 
     await toggle.click();
     await expect(toggle).toHaveText("Measure: OFF");
