@@ -159,6 +159,19 @@ interface ProfileOutline {
   simple: boolean;
 }
 
+interface ResolvedUnit {
+  /** Multiplies a stored value into m, m², m³, kg, or s. */
+  toCanonical: number;
+  symbol: string;
+}
+
+interface QuantityUnitChoice {
+  /** True when an override or project unit was declared for this dimension. */
+  declared: boolean;
+  resolved: ResolvedUnit | null;
+  symbol: string;
+}
+
 /** Column-major 4x4, same layout as `THREE.Matrix4.elements`. */
 type Mat4 = number[];
 
@@ -184,6 +197,7 @@ export class IfcParameterReader {
   private readonly containerOfElement = new Map<number, number>();
   private readonly psetsOfElement = new Map<number, number[]>();
   private readonly typeOfElement = new Map<number, number>();
+  private readonly projectUnits = new Map<string, any>();
 
   private constructor(api: WEBIFC.IfcAPI, modelId: number, ownsApi: boolean) {
     this.api = api;
@@ -244,42 +258,84 @@ export class IfcParameterReader {
   }
 
   private readUnits(): void {
-    for (const id of this.idsOfType(WEBIFC.IFCUNITASSIGNMENT)) {
+    const projectId = this.idsOfType(WEBIFC.IFCPROJECT)[0];
+    const projectAssignmentId = refId(this.line(projectId)?.UnitsInContext);
+    const assignmentIds =
+      projectAssignmentId === null
+        ? this.idsOfType(WEBIFC.IFCUNITASSIGNMENT)
+        : [projectAssignmentId];
+    for (const id of assignmentIds) {
       const assignment = this.line(id);
       for (const handle of asArray(assignment?.Units)) {
         const unitId = refId(handle);
         if (unitId === null) continue;
         const unit = this.line(unitId);
         if (!unit) continue;
-        if (scalarOf(unit.UnitType) !== "LENGTHUNIT") continue;
-        const kind = this.kindOf(unit);
-        if (kind === "IFCSIUNIT") {
-          const prefix = scalarOf(unit.Prefix) as string | null;
-          const factor = prefix ? (SI_PREFIX_FACTOR[prefix] ?? 1) : 1;
-          this.lengthToMetres = factor;
-          this.lengthUnit = `${prefix ? (SI_PREFIX_SYMBOL[prefix] ?? "") : ""}m`;
-          return;
-        }
-        if (kind === "IFCCONVERSIONBASEDUNIT") {
-          const factorId = refId(unit.ConversionFactor);
-          const measure = factorId === null ? null : this.line(factorId);
-          const component = numberOf(measure?.ValueComponent);
-          const baseId = refId(measure?.UnitComponent);
-          const base = baseId === null ? null : this.line(baseId);
-          const basePrefix = scalarOf(base?.Prefix) as string | null;
-          const baseFactor = basePrefix
-            ? (SI_PREFIX_FACTOR[basePrefix] ?? 1)
-            : 1;
-          if (component !== null) {
-            this.lengthToMetres = component * baseFactor;
-            this.lengthUnit = String(
-              scalarOf(unit.Name) ?? "unit",
-            ).toLowerCase();
-            return;
-          }
-        }
+        const unitType = scalarOf(unit.UnitType);
+        if (typeof unitType === "string") this.projectUnits.set(unitType, unit);
       }
     }
+
+    const length = this.projectUnits.get("LENGTHUNIT");
+    const resolved = length ? this.resolveUnit(length, "LENGTHUNIT") : null;
+    if (resolved) {
+      this.lengthToMetres = resolved.toCanonical;
+      this.lengthUnit = resolved.symbol;
+    }
+  }
+
+  /** Resolve an IFC named unit into the canonical display dimension. */
+  private resolveUnit(unit: any, expectedType: string): ResolvedUnit | null {
+    const kind = this.kindOf(unit);
+    if (kind === "IFCSIUNIT") {
+      const prefix = scalarOf(unit.Prefix) as string | null;
+      const prefixFactor = prefix ? (SI_PREFIX_FACTOR[prefix] ?? 1) : 1;
+      const name = String(scalarOf(unit.Name) ?? "");
+      let toCanonical: number | null = null;
+      if (name === "METRE") toCanonical = prefixFactor;
+      // Prefix scales the named SI unit as a whole: MICRO SQUARE_METRE is
+      // 1e-6 m² (equivalent to mm²), and NANO CUBIC_METRE is 1e-9 m³.
+      if (name === "SQUARE_METRE") toCanonical = prefixFactor;
+      if (name === "CUBIC_METRE") toCanonical = prefixFactor;
+      // IFC defines the SI mass name as GRAM even though the SI base unit is kg.
+      if (name === "GRAM") toCanonical = prefixFactor * 1e-3;
+      if (name === "SECOND") toCanonical = prefixFactor;
+      return toCanonical === null
+        ? null
+        : { toCanonical, symbol: this.unitSymbol(unit) };
+    }
+
+    if (
+      kind === "IFCCONVERSIONBASEDUNIT" ||
+      kind === "IFCCONVERSIONBASEDUNITWITHOFFSET"
+    ) {
+      const factorId = refId(unit.ConversionFactor);
+      const measure = factorId === null ? null : this.line(factorId);
+      const component = numberOf(measure?.ValueComponent);
+      const baseId = refId(measure?.UnitComponent);
+      const base = baseId === null ? null : this.line(baseId);
+      const baseUnit = base ? this.resolveUnit(base, expectedType) : null;
+      if (component === null || !baseUnit) return null;
+      return {
+        toCanonical: component * baseUnit.toCanonical,
+        symbol: String(scalarOf(unit.Name) ?? this.unitSymbol(unit)).toLowerCase(),
+      };
+    }
+
+    return null;
+  }
+
+  /** Quantity.Unit overrides the corresponding project unit when present. */
+  private quantityUnit(prop: any, unitType: string): QuantityUnitChoice {
+    const overrideId = refId(prop.Unit);
+    const unit =
+      overrideId === null ? this.projectUnits.get(unitType) : this.line(overrideId);
+    if (!unit) return { declared: false, resolved: null, symbol: "" };
+    return {
+      declared: true,
+      resolved: this.resolveUnit(unit, unitType),
+      symbol: this.unitSymbol(unit),
+    };
   }
 
   private indexRelations(): void {
@@ -1180,9 +1236,10 @@ export class IfcParameterReader {
       if (prop[key] === undefined) continue;
       const value = numberOf(prop[key]);
       if (value === null) return { label, value: UNSET };
-      if (key === "LengthValue") return this.lengthRow(label, value);
-      if (key === "AreaValue") return this.areaRow(label, value);
-      if (key === "VolumeValue") return this.volumeRow(label, value);
+      if (key === "LengthValue") return this.quantityLengthRow(label, value, prop);
+      if (key === "AreaValue") return this.quantityAreaRow(label, value, prop);
+      if (key === "VolumeValue") return this.quantityVolumeRow(label, value, prop);
+      if (key === "WeightValue") return this.quantityWeightRow(label, value, prop);
       return { label, value: fmt(value), raw: value, unit: "" };
     }
     return null;
@@ -1369,6 +1426,87 @@ export class IfcParameterReader {
       value: this.fmtVolume(modelUnits),
       raw: modelUnits * this.lengthToMetres ** 3,
       unit: "m³",
+    };
+  }
+
+  private quantityLengthRow(label: string, value: number, prop: any): ParamRow {
+    const choice = this.quantityUnit(prop, "LENGTHUNIT");
+    if (choice.resolved) {
+      return this.quantityCanonicalRow(
+        label,
+        value * choice.resolved.toCanonical / DISPLAY_LENGTH_IN_METRES,
+        DISPLAY_LENGTH_UNIT,
+      );
+    }
+    if (choice.declared) {
+      return this.unconvertedQuantityRow(label, value, choice.symbol);
+    }
+    return this.lengthRow(label, value);
+  }
+
+  private quantityAreaRow(label: string, value: number, prop: any): ParamRow {
+    const choice = this.quantityUnit(prop, "AREAUNIT");
+    if (choice.resolved) {
+      return this.quantityCanonicalRow(
+        label,
+        value * choice.resolved.toCanonical,
+        "m²",
+      );
+    }
+    if (choice.declared) {
+      return this.unconvertedQuantityRow(label, value, choice.symbol);
+    }
+    // IFC permits AREAUNIT to be omitted; only then derive it from LENGTHUNIT.
+    return this.quantityCanonicalRow(label, value * this.lengthToMetres ** 2, "m²");
+  }
+
+  private quantityVolumeRow(label: string, value: number, prop: any): ParamRow {
+    const choice = this.quantityUnit(prop, "VOLUMEUNIT");
+    if (choice.resolved) {
+      return this.quantityCanonicalRow(
+        label,
+        value * choice.resolved.toCanonical,
+        "m³",
+      );
+    }
+    if (choice.declared) {
+      return this.unconvertedQuantityRow(label, value, choice.symbol);
+    }
+    // IFC permits VOLUMEUNIT to be omitted; only then derive it from LENGTHUNIT.
+    return this.quantityCanonicalRow(label, value * this.lengthToMetres ** 3, "m³");
+  }
+
+  private quantityWeightRow(label: string, value: number, prop: any): ParamRow {
+    const choice = this.quantityUnit(prop, "MASSUNIT");
+    if (choice.resolved) {
+      return this.quantityCanonicalRow(
+        label,
+        value * choice.resolved.toCanonical,
+        "kg",
+      );
+    }
+    if (choice.declared) {
+      return this.unconvertedQuantityRow(label, value, choice.symbol);
+    }
+    return { label, value: fmt(value), raw: value, unit: "" };
+  }
+
+  /** IFC quantities use three decimal places; mesh-derived values retain SI precision. */
+  private quantityCanonicalRow(label: string, value: number, unit: string): ParamRow {
+    return { label, value: `${fmt(value)} ${unit}`, raw: value, unit };
+  }
+
+  /** Preserve an explicitly declared unit even if this reader cannot convert it. */
+  private unconvertedQuantityRow(
+    label: string,
+    value: number,
+    unit: string,
+  ): ParamRow {
+    return {
+      label,
+      value: `${fmt(value)}${unit ? ` ${unit}` : ""}`,
+      raw: value,
+      unit,
     };
   }
 
