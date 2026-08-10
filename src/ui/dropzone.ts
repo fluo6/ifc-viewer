@@ -7,13 +7,13 @@ export function mountDropzone(viewer: Viewer): void {
 
   placeholder.classList.add("empty");
   placeholder.textContent =
-    "Drop an .ifc file here, or click Open in the toolbar.";
+    "Drop an .ifc file here, or click Open to choose one.";
 
   viewer.onModelLoaded.on(() => placeholder.classList.remove("empty"));
   viewer.onModelUnloaded.on(() => {
     placeholder.classList.add("empty");
     placeholder.textContent =
-      "Drop an .ifc file here, or click Open in the toolbar.";
+      "Drop an .ifc file here, or click Open to choose one.";
   });
 
   const stop = (e: DragEvent) => {

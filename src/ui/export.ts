@@ -1,6 +1,7 @@
-import { buildWorkbook, type ReportInput } from "../report";
+import { buildWorkbook, type CellValue, type ReportInput, type WorkbookModel } from "../report";
 import type { ElementParameters, Viewer } from "../viewer";
 import { toast } from "./toast";
+import ExcelJS from "exceljs";
 
 export function mountExport(viewer: Viewer): void {
   const button = document.getElementById("export-btn") as HTMLButtonElement;
@@ -15,13 +16,6 @@ export function mountExport(viewer: Viewer): void {
 
   button.addEventListener("click", async () => {
     if (busy) return;
-
-    // The renderer also runs in a plain browser under `vite`, where there is no
-    // IPC bridge. Same guard as mountToolbar's open button.
-    if (!window.electron?.saveXlsxDialog) {
-      toast("Export only works inside the Electron app", "info");
-      return;
-    }
 
     if (viewer.isStreamed()) {
       toast("Parameters are unavailable for streamed models over 50 MB", "info");
@@ -46,16 +40,21 @@ export function mountExport(viewer: Viewer): void {
     button.disabled = true;
     const previousLabel = button.textContent;
     try {
-      const filePath = await window.electron.saveXlsxDialog(suggested);
-      if (!filePath) return; // cancelled -- the user changed their mind, silent no-op
-
       button.textContent = "Exporting…";
       const { elements, unreadable } = collect(viewer);
       const model = buildWorkbook(
         { filename: sourceName, ...units, elements },
         new Date().toISOString(),
       );
-      await window.electron.writeXlsx(filePath, model);
+      let outputName = suggested;
+      if (window.electron?.saveXlsxDialog && window.electron.writeXlsx) {
+        const filePath = await window.electron.saveXlsxDialog(suggested);
+        if (!filePath) return;
+        await window.electron.writeXlsx(filePath, model);
+        outputName = filePath.split(/[\\/]/).pop() ?? suggested;
+      } else {
+        await downloadWorkbook(model, suggested);
+      }
       const total = model.sheets
         .filter((s) => s.name !== "Model" && s.name !== "Profiles")
         .reduce((n, s) => n + s.rows.length, 0);
@@ -73,10 +72,7 @@ export function mountExport(viewer: Viewer): void {
         notes.push(`${model.unitConflicts} values whose unit differs from their column`);
       }
       const suffix = notes.length ? ` (${notes.join(", ")})` : "";
-      toast(
-        `Exported ${total} elements to ${filePath.split(/[\\/]/).pop()}${suffix}`,
-        "info",
-      );
+      toast(`Exported ${total} elements to ${outputName}${suffix}`, "info");
     } catch (err) {
       toast(`Export failed: ${(err as Error).message}`);
     } finally {
@@ -85,6 +81,48 @@ export function mountExport(viewer: Viewer): void {
       button.textContent = previousLabel ?? "Export XLSX";
     }
   });
+}
+
+/** Serialize a report in the browser and trigger a local XLSX download. */
+export async function downloadWorkbook(model: WorkbookModel, filename: string): Promise<void> {
+  const book = new ExcelJS.Workbook();
+  book.creator = "IFC Viewer";
+  for (const sheet of model.sheets) {
+    const worksheet = book.addWorksheet(sheet.name);
+    worksheet.addRow(sheet.columns.map((column) => column.header));
+    worksheet.getRow(1).font = { bold: true };
+    for (const row of sheet.rows) {
+      worksheet.addRow(row.map((value: CellValue) => (value === null ? undefined : value)));
+    }
+    if (sheet.name !== "Model") {
+      worksheet.views = [{ state: "frozen", ySplit: 1 }];
+      if (sheet.columns.length > 0 && sheet.rows.length > 0) {
+        worksheet.autoFilter = {
+          from: { row: 1, column: 1 },
+          to: { row: 1, column: sheet.columns.length },
+        };
+      }
+    }
+    for (let i = 0; i < sheet.columns.length; i++) {
+      worksheet.getColumn(i + 1).width = Math.min(
+        40,
+        Math.max(12, (sheet.columns[i]?.header.length ?? 12) + 2),
+      );
+    }
+  }
+
+  const buffer = await book.xlsx.writeBuffer();
+  const url = URL.createObjectURL(new Blob([buffer], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  }));
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 /**

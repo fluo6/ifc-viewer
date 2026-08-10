@@ -9,6 +9,37 @@ npm install
 npm run dev
 ```
 
+## LAN web app
+
+The same renderer can run as a browser app for another machine on the local
+network. It processes IFC files in that browser; the host only serves the
+static application and never receives the model.
+
+From this directory, start the production container:
+
+```bash
+docker compose up -d --build
+```
+
+Find this host's LAN address (`hostname -I` on Linux), then open
+`http://<host-ip>:2710` from the other machine. Use **Open IFC…** to choose a
+file on that machine or drag one into the viewer. **Export XLSX** downloads the
+workbook through the browser.
+
+Port 2710 is the default. Change it without editing the compose file:
+
+```bash
+IFC_VIEWER_PORT=2711 docker compose up -d --build
+```
+
+Allow the selected TCP port through the host firewall if the browser cannot
+connect. This mode has no authentication and is intended only for a trusted
+LAN; do not expose it directly to the public internet. Stop it with:
+
+```bash
+docker compose down
+```
+
 ## Package
 
 ```

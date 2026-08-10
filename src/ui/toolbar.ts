@@ -3,6 +3,7 @@ import { toast } from "./toast";
 
 export function mountToolbar(viewer: Viewer): void {
   const openBtn = document.getElementById("open-btn") as HTMLButtonElement;
+  const fileInput = document.getElementById("model-file-input") as HTMLInputElement;
   const nameEl = document.getElementById("model-name")!;
   const countEl = document.getElementById("model-count")!;
   const progress = document.getElementById("progress")!;
@@ -10,12 +11,27 @@ export function mountToolbar(viewer: Viewer): void {
 
   openBtn.addEventListener("click", async () => {
     if (!window.electron?.openFileDialog) {
-      toast("File dialog only works inside the Electron app", "info");
+      fileInput.click();
       return;
     }
     const filePath = await window.electron.openFileDialog();
     if (!filePath) return;
     await loadFromPath(viewer, filePath);
+  });
+
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files?.[0];
+    fileInput.value = "";
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".ifc")) {
+      toast("Only .ifc files are supported");
+      return;
+    }
+    try {
+      await viewer.loadIfc(file);
+    } catch (err) {
+      toast((err as Error).message);
+    }
   });
 
   if (window.electron?.onOpenFile) {
