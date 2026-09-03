@@ -59,6 +59,10 @@ export class Viewer {
     OBC.SimpleCamera,
     OBC.SimpleRenderer
   >;
+  // Same object as world.renderer, held at its concrete type so the edges
+  // methods can reach .postproduction -- SimpleWorld types the slot as
+  // SimpleRenderer.
+  private ppRenderer!: OBF.PostproductionRenderer;
   private ifcLoader!: OBC.IfcLoader;
   private tiler!: OBC.IfcGeometryTiler;
   private streamer!: OBF.IfcStreamer;
@@ -99,13 +103,29 @@ export class Viewer {
       OBC.SimpleRenderer
     >();
     world.scene = new OBC.SimpleScene(components);
-    // RendererWith2D extends SimpleRenderer and adds a CSS2DRenderer, which is
-    // what draws measurement labels. Its label layer is pointer-events:none, so
-    // it does not intercept selection clicks.
-    world.renderer = new OBF.RendererWith2D(components, container);
+    // PostproductionRenderer extends RendererWith2D, which in turn extends
+    // SimpleRenderer and adds a CSS2DRenderer -- what draws measurement labels.
+    // That label layer is pointer-events:none, so it does not intercept
+    // selection clicks. The composer it adds on top is what can draw outlines.
+    const renderer = new OBF.PostproductionRenderer(components, container);
+    this.ppRenderer = renderer;
+    world.renderer = renderer;
     world.camera = new OBC.SimpleCamera(components);
     world.scene.setup();
     components.init();
+
+    // Bring the composer up once, here, rather than on the first setEdges():
+    // initialize() irreversibly changes how the shared renderer draws, so
+    // deferring it would make the very first edges toggle visibly restyle the
+    // whole model. Outlines themselves start off. overrideClippingPlanes is
+    // left at its default false, which is what hands the composer the planes
+    // setClippingPlane() registers -- setting it true detaches them.
+    renderer.postproduction.enabled = true;
+    renderer.postproduction.setPasses({ gamma: true, custom: false, ao: false });
+    // Gloss rides along inside CustomEffectsPass and is on by default. It is a
+    // fresnel highlight, nothing to do with edges, and it fills surfaces seen
+    // near edge-on with solid black -- a slab over the model on real files.
+    renderer.postproduction.customEffects.glossEnabled = false;
 
     world.scene.three.background = new THREE.Color("#1a1f26");
     world.camera.controls.setLookAt(20, 20, 20, 0, 0, 0);
@@ -500,6 +520,39 @@ export class Viewer {
 
   isStreamed(): boolean {
     return this.currentIsStreamed;
+  }
+
+  private get postFx(): OBF.Postproduction {
+    return this.ppRenderer.postproduction;
+  }
+
+  /**
+   * Toggle screen-space outline rendering.
+   *
+   * Only the edge pass is switched. Postproduction as a whole stays on for the
+   * session (see init) because Postproduction.initialize() mutates the shared
+   * WebGLRenderer once and irreversibly -- toggling `enabled` instead leaves
+   * the pre-initialisation render unreachable, so turning edges off would not
+   * restore the frame you started with (measured: 13% of pixels changed, peak
+   * channel delta 151).
+   */
+  setEdges(on: boolean): void {
+    // The edge detection lives in CustomEffectsPass's shader and is active
+    // whenever that pass is in the composer, so adding/removing the pass is
+    // the toggle. Not customEffects.outlineEnabled -- that drives the
+    // selective per-mesh highlight overlay, which has nothing registered here
+    // and so renders nothing at all.
+    this.postFx.setPasses({ custom: on });
+  }
+
+  /** Read back off the renderer rather than a mirrored flag. */
+  edgesOn(): boolean {
+    return this.postFx.settings.custom === true;
+  }
+
+  /** Gloss is a library default we deliberately turn off. For tests. */
+  debugGlossEnabled(): boolean {
+    return this.postFx.customEffects.glossEnabled;
   }
 
   /** Renderer-level flag the clipper depends on. Exposed for regression tests. */
