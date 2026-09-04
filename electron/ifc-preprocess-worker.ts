@@ -20,8 +20,9 @@ async function main() {
     process.exit(1);
   }
 
-  process.parentPort.on("message", async (event: { data: WorkerInput }) => {
-    const { sourcePath, outputPath, wasmDirectory, settings } = event.data;
+  process.parentPort.on("message", async (event: any) => {
+    const input = (event && (event as any).data) ? (event as any).data : event;
+    const { sourcePath, outputPath, wasmDirectory, settings } = input as WorkerInput;
     let handle: FileHandle | null = null;
     try {
       handle = await open(sourcePath, "r");

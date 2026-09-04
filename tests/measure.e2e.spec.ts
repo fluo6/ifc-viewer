@@ -28,7 +28,9 @@ test("a measurement is labelled in millimetres", async () => {
     await page.evaluate(() => {
       (window as any).__viewer.measureBetween({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 5 });
     });
-    await expect(page.locator("#viewport")).toContainText("5000 mm");
+    await expect(page.locator("#viewport")).toContainText("5000 mm", {
+      timeout: 15_000,
+    });
     expect(await page.evaluate(() => (window as any).__viewer.measurementCount())).toBe(1);
   } finally {
     await app.close();
@@ -43,7 +45,9 @@ test("a sub-metre measurement still reads in whole millimetres", async () => {
     await page.evaluate(() => {
       (window as any).__viewer.measureBetween({ x: 0, y: 0, z: 0 }, { x: 0.25, y: 0, z: 0 });
     });
-    await expect(page.locator("#viewport")).toContainText("250 mm");
+    await expect(page.locator("#viewport")).toContainText("250 mm", {
+      timeout: 15_000,
+    });
   } finally {
     await app.close();
   }

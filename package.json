@@ -12,7 +12,8 @@
       "package.json"
     ],
     "extraResources": [
-      "public/web-ifc.wasm"
+      "public/web-ifc.wasm",
+      "public/web-ifc-node.wasm"
     ],
     "win": {
       "target": "nsis",
@@ -24,6 +25,9 @@
         }
       ]
     },
+    "linux": {
+      "target": ["dir"]
+    },
     "directories": {
       "output": "release"
     }
@@ -32,7 +36,7 @@
     "postinstall": "node scripts/copy-wasm.mjs",
     "dev": "node scripts/dev.mjs",
     "build:renderer": "vite build",
-    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:electron": "tsc -p tsconfig.electron.json && esbuild electron/ifc-preprocess-worker.ts --bundle --platform=node --target=node20 --outfile=dist-electron/ifc-preprocess-worker.js",
     "build": "npm run build:renderer && npm run build:electron",
     "dist": "npm run build && electron-builder",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",

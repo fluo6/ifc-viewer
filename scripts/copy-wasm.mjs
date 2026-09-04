@@ -10,7 +10,12 @@ const destDir = resolve(root, "public");
 // web-ifc 0.0.77 ships single- and multi-threaded WASM, but no separate MT
 // worker script. Keep public/ exactly aligned with the installed package so a
 // stale worker from an older version can never be packaged beside new WASM.
-const files = ["web-ifc.wasm", "web-ifc-mt.wasm", "web-ifc-mt.worker.js"];
+const files = [
+  "web-ifc.wasm",
+  "web-ifc-node.wasm",
+  "web-ifc-mt.wasm",
+  "web-ifc-mt.worker.js",
+];
 
 mkdirSync(destDir, { recursive: true });
 let copied = 0;

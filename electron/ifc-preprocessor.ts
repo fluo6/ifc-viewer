@@ -221,12 +221,23 @@ export class UtilityProcessConverter implements IfcConverter {
 
     return new Promise<void>((resolve, reject) => {
       let child: any = null;
+      let stderr = "";
       try {
-        child = utilityProcess.fork(this.workerScriptPath);
+        child = utilityProcess.fork(this.workerScriptPath, [], {
+          stdio: "pipe",
+        });
       } catch (err) {
         reject(err);
         return;
       }
+
+      child.stderr?.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+        console.error("[preprocessor worker stderr]", chunk.toString());
+      });
+      child.stdout?.on("data", (chunk: Buffer) => {
+        console.log("[preprocessor worker stdout]", chunk.toString());
+      });
 
       child.on("message", (msg: { type: string; progress?: number; stage?: string; message?: string }) => {
         if (msg.type === "progress") {
@@ -250,7 +261,13 @@ export class UtilityProcessConverter implements IfcConverter {
 
       child.on("exit", (code: number | null) => {
         if (code !== 0 && code !== null) {
-          reject(new Error(`Preprocessor worker exited with code ${code}`));
+          reject(
+            new Error(
+              `Preprocessor worker exited with code ${code}${
+                stderr ? `: ${stderr.trim()}` : ""
+              }`,
+            ),
+          );
         }
       });
 

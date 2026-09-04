@@ -147,6 +147,11 @@ export class Viewer {
   private initialized = false;
   private edgesPreference = false;
   private hiddenLines = false;
+  private lastPreparedResult: {
+    cacheId: string;
+    filename: string;
+    cacheHit: boolean;
+  } | null = null;
 
   private applyRenderStyle(): void {
     this.ppRenderer.postproduction.style = this.hiddenLines
@@ -301,6 +306,7 @@ export class Viewer {
     let fragmentBuffer: ArrayBuffer;
     try {
       const prepared = await window.electron.prepareIfc(filePath);
+      this.lastPreparedResult = prepared;
       fragmentBuffer = await window.electron.readPreparedIfc(prepared.cacheId);
     } finally {
       unsubscribe?.();
@@ -534,6 +540,14 @@ export class Viewer {
 
   debugInitialized(): boolean {
     return this.initialized;
+  }
+
+  debugLastPrepared(): {
+    cacheId: string;
+    filename: string;
+    cacheHit: boolean;
+  } | null {
+    return this.lastPreparedResult;
   }
 
   /** Whether the live ruler cursor is currently snapped to a vertex. */
