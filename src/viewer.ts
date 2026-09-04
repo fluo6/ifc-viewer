@@ -494,6 +494,15 @@ export class Viewer {
     return this.edgesPreference;
   }
 
+  setHiddenLines(on: boolean): void {
+    this.hiddenLines = on;
+    this.applyRenderStyle();
+  }
+
+  hiddenLinesOn(): boolean {
+    return this.hiddenLines;
+  }
+
   debugPostproductionStyle(): string {
     const style = this.ppRenderer.postproduction.style;
     return OBF.PostproductionAspect[style] ?? String(style);

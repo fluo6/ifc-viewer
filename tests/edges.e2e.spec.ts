@@ -126,7 +126,7 @@ test("the edges button turns outline rendering on and off", async () => {
   const app = await launchViewer();
   try {
     const page = await loaded(app);
-    const btn = page.locator("#edges button");
+    const btn = page.getByRole("button", { name: /^Edges:/ });
     const enabled = () =>
       page.evaluate(() => (window as any).__viewer.edgesOn());
 
@@ -140,6 +140,143 @@ test("the edges button turns outline rendering on and off", async () => {
     await btn.click();
     await expect(btn).toHaveText("Edges: OFF");
     expect(await enabled()).toBe(false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("enabling hidden lines visibly changes the render, and toggling off restores normal", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const viewport = page.locator("#viewport");
+
+    const normal = await settled(page, viewport);
+
+    await page.evaluate(() => (window as any).__viewer.setHiddenLines(true));
+    expect(
+      await page.evaluate(() => (window as any).__viewer.debugPostproductionStyle()),
+    ).toBe("PEN");
+    const pen = await settled(page, viewport);
+    expect(pen.equals(normal)).toBe(false);
+
+    await page.evaluate(() => (window as any).__viewer.setHiddenLines(false));
+    expect(
+      await page.evaluate(() => (window as any).__viewer.debugPostproductionStyle()),
+    ).toBe("COLOR");
+    expect((await settled(page, viewport)).equals(normal)).toBe(true);
+  } finally {
+    await app.close();
+  }
+});
+
+test("hidden lines restores edge rendering when edges was on", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const viewport = page.locator("#viewport");
+
+    await page.evaluate(() => (window as any).__viewer.setEdges(true));
+    expect(
+      await page.evaluate(() => (window as any).__viewer.debugPostproductionStyle()),
+    ).toBe("COLOR_PEN");
+    const edged = await settled(page, viewport);
+
+    await page.evaluate(() => (window as any).__viewer.setHiddenLines(true));
+    expect(
+      await page.evaluate(() => (window as any).__viewer.debugPostproductionStyle()),
+    ).toBe("PEN");
+    const pen = await settled(page, viewport);
+    expect(pen.equals(edged)).toBe(false);
+
+    await page.evaluate(() => (window as any).__viewer.setHiddenLines(false));
+    expect(
+      await page.evaluate(() => (window as any).__viewer.debugPostproductionStyle()),
+    ).toBe("COLOR_PEN");
+    expect((await settled(page, viewport)).equals(edged)).toBe(true);
+  } finally {
+    await app.close();
+  }
+});
+
+test("clipping still cuts geometry while hidden lines are on", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const viewport = page.locator("#viewport");
+
+    await page.evaluate(() => (window as any).__viewer.setHiddenLines(true));
+    const penUnclipped = await settled(page, viewport);
+
+    await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      const range = viewer.getModelHeightRange();
+      viewer.setClippingPlane(true, (range.min + range.max) / 2);
+    });
+    expect(
+      (await settled(page, viewport)).equals(penUnclipped),
+      "a mid-height clipping plane changed nothing in hidden-lines mode",
+    ).toBe(false);
+    expect(
+      await page.evaluate(() => (window as any).__viewer.debugClippingPlaneCount()),
+    ).toBe(1);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the hidden lines button toggles hidden line rendering on and off and preserves edges state", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const edgesBtn = page.getByRole("button", { name: /^Edges:/ });
+    const hiddenLinesBtn = page.getByRole("button", { name: /^Hidden lines:/ });
+
+    await expect(edgesBtn).toHaveText("Edges: OFF");
+    await expect(hiddenLinesBtn).toHaveText("Hidden lines: OFF");
+
+    await hiddenLinesBtn.click();
+    await expect(hiddenLinesBtn).toHaveText("Hidden lines: ON");
+    expect(
+      await page.evaluate(() => (window as any).__viewer.hiddenLinesOn()),
+    ).toBe(true);
+    expect(
+      await page.evaluate(() => (window as any).__viewer.debugPostproductionStyle()),
+    ).toBe("PEN");
+
+    // Toggle edges on while hidden lines is active
+    await edgesBtn.click();
+    await expect(edgesBtn).toHaveText("Edges: ON");
+    expect(
+      await page.evaluate(() => (window as any).__viewer.edgesOn()),
+    ).toBe(true);
+    expect(
+      await page.evaluate(() => (window as any).__viewer.debugPostproductionStyle()),
+    ).toBe("PEN");
+
+    // Toggle hidden lines off: style should restore to COLOR_PEN
+    await hiddenLinesBtn.click();
+    await expect(hiddenLinesBtn).toHaveText("Hidden lines: OFF");
+    expect(
+      await page.evaluate(() => (window as any).__viewer.hiddenLinesOn()),
+    ).toBe(false);
+    expect(
+      await page.evaluate(() => (window as any).__viewer.debugPostproductionStyle()),
+    ).toBe("COLOR_PEN");
+
+    // Toggle edges off: style restores to COLOR
+    await edgesBtn.click();
+    await expect(edgesBtn).toHaveText("Edges: OFF");
+    expect(
+      await page.evaluate(() => (window as any).__viewer.edgesOn()),
+    ).toBe(false);
+    expect(
+      await page.evaluate(() => (window as any).__viewer.debugPostproductionStyle()),
+    ).toBe("COLOR");
   } finally {
     await app.close();
   }
