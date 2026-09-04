@@ -299,7 +299,7 @@ test("clicking twice on the model creates a measurement after a second load", as
   }
 });
 
-test("a failed streamed load keeps the existing model open", async () => {
+test("a failed native large-file conversion keeps the existing model open", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
@@ -314,30 +314,26 @@ test("a failed streamed load keeps the existing model open", async () => {
       };
     });
 
+    await app.evaluate(async ({ ipcMain }) => {
+      ipcMain.removeHandler("ifc:get-size");
+      ipcMain.handle("ifc:get-size", async () => 60 * 1024 * 1024);
+      ipcMain.removeHandler("ifc:prepare");
+      ipcMain.handle("ifc:prepare", async () => {
+        throw new Error("synthetic conversion failure");
+      });
+    });
+
     const result = await page.evaluate(async () => {
       const viewer = (window as any).__viewer;
-      const tiler = viewer.tiler;
-      const streamer = viewer.streamer;
-      const originalStreamFromBuffer = tiler.streamFromBuffer.bind(tiler);
-      const originalLoad = streamer.load.bind(streamer);
-
-      tiler.streamFromBuffer = async () => {};
-      streamer.load = async () => {
-        throw new Error("synthetic stream failure");
-      };
-
       try {
-        await viewer.loadIfcStreaming(new Uint8Array([1, 2, 3]), "broken.ifc");
+        await viewer.loadIfcPath("C:/broken.ifc");
         return "resolved";
       } catch (err) {
         return (err as Error).message;
-      } finally {
-        tiler.streamFromBuffer = originalStreamFromBuffer;
-        streamer.load = originalLoad;
       }
     });
 
-    expect(result).toBe("Stream-load failed: synthetic stream failure");
+    expect(result).toContain("synthetic conversion failure");
     expect(
       await page.evaluate(() => {
         const viewer = (window as any).__viewer;

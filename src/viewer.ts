@@ -41,6 +41,7 @@ export interface Point3 {
 const SNAP_DISTANCE_METRES = 0.05;
 const PICKER_SIZE_PX = 6;
 const IFCOPENINGELEMENT = 3588315303;
+export const LARGE_IFC_THRESHOLD_BYTES = 50 * 1024 * 1024;
 
 const QUANTITY_VALUE_KEYS = [
   "LengthValue",
@@ -143,6 +144,7 @@ export class Viewer {
    * profile dimensions, extrusions and placements are only reachable this way.
    */
   private paramReader: IfcParameterReader | null = null;
+  private initialized = false;
 
   async init(container: HTMLElement): Promise<void> {
     const components = new OBC.Components();
@@ -249,11 +251,71 @@ export class Viewer {
     lengthMeasurement.units = "mm";
     lengthMeasurement.rounding = 0;
 
+    const raycasters = components.get(OBC.Raycasters);
+    const raycaster = raycasters.get(world);
+    const dom = renderer.three.domElement;
+    if (dom && (raycaster as any)?.mouse) {
+      dom.addEventListener("pointerdown", (e) =>
+        (raycaster as any).mouse.updateMouseInfo(e),
+      );
+      dom.addEventListener("click", (e) =>
+        (raycaster as any).mouse.updateMouseInfo(e),
+      );
+    }
+
     this.components = components;
     this.world = world;
     this.ifcLoader = ifcLoader;
     this.highlighter = highlighter;
     this.lengthMeasurement = lengthMeasurement;
+    this.initialized = true;
+  }
+
+  async loadIfcPath(filePath: string): Promise<void> {
+    const filename = filePath.split(/[\\/]/).pop() ?? "model.ifc";
+    const fileSize = await window.electron.getIfcFileSize(filePath);
+
+    if (fileSize <= LARGE_IFC_THRESHOLD_BYTES) {
+      const buf = await window.electron.readFile(filePath);
+      return this.loadIfc(buf, filename);
+    }
+
+    this.onLoadProgress.emit({ loaded: 0, total: 100 });
+    const unsubscribe = window.electron.onIfcPreprocessProgress?.((p) => {
+      this.onLoadProgress.emit({
+        loaded: Math.round(p.progress * 100),
+        total: 100,
+      });
+    });
+
+    let fragmentBuffer: ArrayBuffer;
+    try {
+      const prepared = await window.electron.prepareIfc(filePath);
+      fragmentBuffer = await window.electron.readPreparedIfc(prepared.cacheId);
+    } finally {
+      unsubscribe?.();
+    }
+
+    const modelId = `${filename}-${crypto.randomUUID()}`;
+    const newModel = await this.fragmentsManager.core.load(
+      new Uint8Array(fragmentBuffer),
+      {
+        modelId,
+        camera: this.world.camera.three,
+      },
+    );
+
+    if (this.currentModel) await this.unloadIfc();
+
+    this.currentModel = newModel;
+    this.currentFilename = filename;
+    this.currentIsStreamed = true;
+
+    await this.fragmentsManager.core.update(true);
+
+    this.onLoadProgress.emit({ loaded: 100, total: 100 });
+    await this.classifyAndEmit(newModel, filename, true);
+    this.fitToModel(newModel);
   }
 
   async loadIfc(input: File | ArrayBuffer, filename?: string): Promise<void> {
@@ -303,6 +365,7 @@ export class Viewer {
       total: buffer.byteLength,
     });
 
+    await this.fragmentsManager.core.update(true);
     await this.openParameterReader(buffer);
     await this.classifyAndEmit(model, name, false);
     this.fitToModel(model);
@@ -364,8 +427,9 @@ export class Viewer {
         center.x,
         center.y,
         center.z,
-        true,
+        false,
       );
+      this.world.camera.controls.update(0.016);
     }
   }
 
@@ -446,7 +510,11 @@ export class Viewer {
   }
 
   debugFragmentsInitialized(): boolean {
-    return this.fragmentsManager.initialized;
+    return Boolean(this.fragmentsManager?.initialized);
+  }
+
+  debugInitialized(): boolean {
+    return this.initialized;
   }
 
   /** Whether the live ruler cursor is currently snapped to a vertex. */
@@ -480,6 +548,7 @@ export class Viewer {
     if (this.measureMode === on) return;
     this.measureMode = on;
     this.lengthMeasurement.enabled = on;
+    (this.lengthMeasurement as any).lastPick = null;
     this.highlighter.enabled = !on;
     this.setMeasureSnapActive(false);
     if (on) {
@@ -510,6 +579,22 @@ export class Viewer {
    */
   async placeMeasurePoint(): Promise<void> {
     if (!this.measureMode) return;
+    const lm = this.lengthMeasurement as any;
+    try {
+      const raycaster = this.components.get(OBC.Raycasters).get(this.world);
+      const hit = await raycaster.castRay();
+      if (hit?.point) {
+        lm.lastPick = hit;
+        if (lm.isDragging && lm._temp?.line) {
+          lm._temp.line.end.copy(hit.point);
+          if (lm._temp.dimension) {
+            lm._temp.dimension.end = lm._temp.line.end;
+          }
+        }
+      }
+    } catch {
+      /* raycast fallback */
+    }
     await this.lengthMeasurement.create();
   }
 

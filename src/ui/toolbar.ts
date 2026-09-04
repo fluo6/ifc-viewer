@@ -1,4 +1,4 @@
-import type { Viewer } from "../viewer";
+import { type Viewer, LARGE_IFC_THRESHOLD_BYTES } from "../viewer";
 import { toast } from "./toast";
 
 export function mountToolbar(viewer: Viewer): void {
@@ -25,6 +25,12 @@ export function mountToolbar(viewer: Viewer): void {
     if (!file) return;
     if (!file.name.toLowerCase().endsWith(".ifc")) {
       toast("Only .ifc files are supported");
+      return;
+    }
+    if (file.size > LARGE_IFC_THRESHOLD_BYTES) {
+      toast(
+        "Files over 50 MiB must be opened using the Open button to enable preprocessing.",
+      );
       return;
     }
     try {
@@ -64,9 +70,7 @@ export function mountToolbar(viewer: Viewer): void {
 
 async function loadFromPath(viewer: Viewer, filePath: string): Promise<void> {
   try {
-    const buf = await window.electron.readFile(filePath);
-    const filename = filePath.split(/[\\/]/).pop() ?? "model.ifc";
-    await viewer.loadIfc(buf, filename);
+    await viewer.loadIfcPath(filePath);
   } catch (err) {
     toast((err as Error).message);
   }

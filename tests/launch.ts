@@ -38,7 +38,7 @@ export async function launchViewer(): Promise<ElectronApplication> {
 export async function readyWindow(app: ElectronApplication) {
   const win = await app.firstWindow();
   await win.waitForFunction(
-    () => (window as any).__viewer !== undefined,
+    () => (window as any).__viewer?.debugInitialized?.() === true,
     undefined,
     { timeout: 60_000 },
   );
