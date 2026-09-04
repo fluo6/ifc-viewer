@@ -24,8 +24,12 @@ export const fixtureExists = (): boolean => existsSync(FIXTURE_IFC);
  */
 export async function launchViewer(): Promise<ElectronApplication> {
   const userDataDir = mkdtempSync(path.join(tmpdir(), "ifc-viewer-e2e-"));
+  const softwareRenderingArgs =
+    process.platform === "linux"
+      ? ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
+      : [];
   return electron.launch({
-    args: [".", `--user-data-dir=${userDataDir}`],
+    args: [".", ...softwareRenderingArgs, `--user-data-dir=${userDataDir}`],
     cwd: REPO,
   });
 }
@@ -33,8 +37,10 @@ export async function launchViewer(): Promise<ElectronApplication> {
 /** Wait for main.ts to finish wiring up and expose the viewer. */
 export async function readyWindow(app: ElectronApplication) {
   const win = await app.firstWindow();
-  await win.waitForFunction(() => (window as any).__viewer !== undefined, {
-    timeout: 60_000,
-  });
+  await win.waitForFunction(
+    () => (window as any).__viewer !== undefined,
+    undefined,
+    { timeout: 60_000 },
+  );
   return win;
 }

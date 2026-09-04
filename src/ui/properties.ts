@@ -51,8 +51,8 @@ export function mountProperties(viewer: Viewer): void {
     }
     render(
       sel.expressId,
-      String((direct as any)?.Name?.value ?? "(unnamed)"),
-      String((direct as any)?.type ?? "Element"),
+      String(propertyValue(direct, "Name") ?? "(unnamed)"),
+      String(direct?.type ?? "Element"),
       groups,
     );
     if (!direct && !psets.length) {
@@ -112,12 +112,26 @@ function attributesGroup(direct: Record<string, unknown> | null): ParamGroup {
   if (direct) {
     for (const [k, v] of Object.entries(direct)) {
       if (k === "expressID" || k === "type") continue;
-      const val = (v as any)?.value ?? v;
+      const val = wrappedValue(v);
       if (val === null || typeof val === "object") continue;
       rows.push({ label: k, value: formatValue(val) });
     }
   }
   return { name: "Attributes", rows };
+}
+
+function propertyValue(
+  direct: Record<string, unknown> | null,
+  name: string,
+): unknown {
+  return direct ? wrappedValue(direct[name]) : undefined;
+}
+
+function wrappedValue(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || !("value" in value)) {
+    return value;
+  }
+  return (value as { value: unknown }).value;
 }
 
 function note(text: string): HTMLElement {

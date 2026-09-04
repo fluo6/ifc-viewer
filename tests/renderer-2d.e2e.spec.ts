@@ -6,6 +6,19 @@ import { launchViewer, readyWindow } from "./launch";
 
 const FIXTURE = path.resolve(__dirname, "fixtures/i-beam.ifc");
 
+test("fragments manager is initialized before a model is loaded", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await readyWindow(app);
+    expect(
+      await page.evaluate(() => (window as any).__viewer.debugFragmentsInitialized()),
+    ).toBe(true);
+  } finally {
+    await app.close();
+  }
+});
+
 /**
  * The CSS2D label layer is an absolutely-positioned div covering the whole
  * viewport. If it ever stops being pointer-events:none, element selection dies

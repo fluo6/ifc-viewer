@@ -35,7 +35,7 @@ export function mountRuler(viewer: Viewer): void {
     pressedAt = { x: ev.clientX, y: ev.clientY };
   });
 
-  canvas?.addEventListener("click", (e) => {
+  canvas?.addEventListener("click", async (e) => {
     const ev = e as MouseEvent;
     const from = pressedAt;
     pressedAt = null;
@@ -45,7 +45,7 @@ export function mountRuler(viewer: Viewer): void {
       const dy = ev.clientY - from.y;
       if (Math.hypot(dx, dy) > DRAG_THRESHOLD_PX) return;
     }
-    viewer.placeMeasurePoint();
+    await viewer.placeMeasurePoint();
     render();
   });
 

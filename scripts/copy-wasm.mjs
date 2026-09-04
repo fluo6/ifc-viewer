@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,21 +7,27 @@ const root = resolve(__dirname, "..");
 const srcDir = resolve(root, "node_modules/web-ifc");
 const destDir = resolve(root, "public");
 
-// Copy both single-threaded and multi-threaded wasm. The IfcLoader/web-ifc
-// pair may request either one depending on the runtime — if the MT variant
-// is requested but missing, web-ifc falls back to a stub that produces
-// "memory access out of bounds" errors when parsing.
+// web-ifc 0.0.77 ships single- and multi-threaded WASM, but no separate MT
+// worker script. Keep public/ exactly aligned with the installed package so a
+// stale worker from an older version can never be packaged beside new WASM.
 const files = ["web-ifc.wasm", "web-ifc-mt.wasm", "web-ifc-mt.worker.js"];
 
 mkdirSync(destDir, { recursive: true });
 let copied = 0;
 for (const f of files) {
   const src = resolve(srcDir, f);
+  const dest = resolve(destDir, f);
   if (!existsSync(src)) {
-    console.warn(`[copy-wasm] not found: ${src} — skipping`);
+    if (existsSync(dest)) {
+      unlinkSync(dest);
+      console.log(`[copy-wasm] removed stale -> ${f}`);
+    }
+    if (f === "web-ifc.wasm") {
+      throw new Error(`[copy-wasm] required file not found: ${src}`);
+    }
     continue;
   }
-  copyFileSync(src, resolve(destDir, f));
+  copyFileSync(src, dest);
   console.log(`[copy-wasm] copied -> ${basename(src)}`);
   copied++;
 }

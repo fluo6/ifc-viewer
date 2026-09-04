@@ -1,10 +1,11 @@
 import * as OBC from "@thatopen/components";
 import * as OBF from "@thatopen/components-front";
 import * as FRAGS from "@thatopen/fragments";
+import fragmentsWorkerUrl from "@thatopen/fragments/worker?url";
 import * as THREE from "three";
 import { Emitter } from "./events";
 import { IfcParameterReader, type ElementParameters } from "./ifc-parameters";
-import { collectSet, type EntityResolver, type IfcSet } from "./ifc-sets";
+import type { IfcSet } from "./ifc-sets";
 
 export type { ElementParameters, ParamGroup, ParamRow } from "./ifc-parameters";
 
@@ -35,15 +36,74 @@ export interface Point3 {
   z: number;
 }
 
-// Files larger than this go through the streaming pipeline (IfcGeometryTiler
-// + IfcStreamer) instead of the in-one-shot IfcLoader. The threshold is
-// well below web-ifc's ~2 GiB wasm memory cap, accounting for the fact that
-// geometry generation typically uses 10-20× the source IFC size.
-const STREAM_THRESHOLD_BYTES = 50 * 1024 * 1024;
-
 // 50 mm. The library default of 0.25 (250 mm) grabs the wrong vertex constantly
 // at building scale.
 const SNAP_DISTANCE_METRES = 0.05;
+const PICKER_SIZE_PX = 6;
+const IFCOPENINGELEMENT = 3588315303;
+
+const QUANTITY_VALUE_KEYS = [
+  "LengthValue",
+  "AreaValue",
+  "VolumeValue",
+  "WeightValue",
+  "CountValue",
+  "TimeValue",
+] as const;
+
+function itemValue(item: FRAGS.ItemData, name: string): unknown {
+  const value = item[name];
+  return value && !Array.isArray(value) ? value.value : undefined;
+}
+
+function relatedItems(item: FRAGS.ItemData, name: string): FRAGS.ItemData[] {
+  const value = item[name];
+  return Array.isArray(value) ? value : [];
+}
+
+function itemLocalId(item: FRAGS.ItemData): number | null {
+  const value = itemValue(item, "_localId");
+  return typeof value === "number" ? value : null;
+}
+
+function itemDataToProperties(item: FRAGS.ItemData): Record<string, unknown> {
+  const properties: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(item)) {
+    if (!Array.isArray(value)) properties[name] = value;
+  }
+  properties.expressID = itemValue(item, "_localId");
+  properties.type = itemValue(item, "_category");
+  return properties;
+}
+
+function fragmentPropertySet(item: FRAGS.ItemData): IfcSet {
+  const fallbackId = itemLocalId(item);
+  const name = itemValue(item, "Name") ?? `Set_${fallbackId ?? "unknown"}`;
+  const props: Record<string, unknown> = {};
+
+  for (const property of relatedItems(item, "HasProperties")) {
+    const label = itemValue(property, "Name");
+    if (label !== undefined && label !== null) {
+      props[String(label)] = itemValue(property, "NominalValue") ?? null;
+    }
+  }
+
+  for (const quantity of relatedItems(item, "Quantities")) {
+    const label = itemValue(quantity, "Name");
+    if (label === undefined || label === null) continue;
+    let value: unknown = null;
+    for (const key of QUANTITY_VALUE_KEYS) {
+      const candidate = itemValue(quantity, key);
+      if (candidate !== undefined) {
+        value = candidate;
+        break;
+      }
+    }
+    props[String(label)] = value;
+  }
+
+  return { name: String(name), props };
+}
 
 export class Viewer {
   readonly onModelLoaded = new Emitter<ModelLoaded>();
@@ -64,25 +124,18 @@ export class Viewer {
   // SimpleRenderer.
   private ppRenderer!: OBF.PostproductionRenderer;
   private ifcLoader!: OBC.IfcLoader;
-  private tiler!: OBC.IfcGeometryTiler;
-  private streamer!: OBF.IfcStreamer;
   private fragmentsManager!: OBC.FragmentsManager;
-  private classifier!: OBC.Classifier;
-  private hider!: OBC.Hider;
   private highlighter!: OBF.Highlighter;
-  private indexer!: OBC.IfcRelationsIndexer;
   private lengthMeasurement!: OBF.LengthMeasurement;
   private measureMode = false;
   private measureSnapActive = false;
 
-  private currentModel: FRAGS.FragmentsGroup | null = null;
+  private currentModel: FRAGS.FragmentsModel | null = null;
   private currentCategories = new Map<string, ElementId[]>();
   private currentFilename = "";
   private currentIsStreamed = false;
   private lastSelection: Selection | null = null;
   private clipPlane: THREE.Plane | null = null;
-  /** In-flight or settled relations indexing for the current model. */
-  private relationsIndexing: Promise<void> | null = null;
 
   /**
    * Raw-IFC reader kept open alongside the fragments. OBC's IfcLoader strips
@@ -90,9 +143,6 @@ export class Viewer {
    * profile dimensions, extrusions and placements are only reachable this way.
    */
   private paramReader: IfcParameterReader | null = null;
-
-  // In-memory tile store for the streaming path. Each load replaces this map.
-  private streamFiles = new Map<string, Uint8Array>();
 
   async init(container: HTMLElement): Promise<void> {
     const components = new OBC.Components();
@@ -114,18 +164,12 @@ export class Viewer {
     world.scene.setup();
     components.init();
 
-    // Bring the composer up once, here, rather than on the first setEdges():
-    // initialize() irreversibly changes how the shared renderer draws, so
-    // deferring it would make the very first edges toggle visibly restyle the
-    // whole model. Outlines themselves start off. overrideClippingPlanes is
-    // left at its default false, which is what hands the composer the planes
-    // setClippingPlane() registers -- setting it true detaches them.
+    // Bring the composer up once so the first edge toggle does not change the
+    // renderer lifecycle as well as its style. COLOR is the normal view;
+    // COLOR_PEN is the 3.x supported visible-edge view.
     renderer.postproduction.enabled = true;
-    renderer.postproduction.setPasses({ gamma: true, custom: false, ao: false });
-    // Gloss rides along inside CustomEffectsPass and is on by default. It is a
-    // fresnel highlight, nothing to do with edges, and it fills surfaces seen
-    // near edge-on with solid black -- a slab over the model on real files.
-    renderer.postproduction.customEffects.glossEnabled = false;
+    renderer.postproduction.style = OBF.PostproductionAspect.COLOR;
+    renderer.postproduction.glossEnabled = false;
 
     world.scene.three.background = new THREE.Color("#1a1f26");
     world.camera.controls.setLookAt(20, 20, 20, 0, 0, 0);
@@ -133,8 +177,7 @@ export class Viewer {
     const grids = components.get(OBC.Grids);
     grids.create(world);
 
-    // Shared web-ifc settings used by both the regular loader and the
-    // streaming tiler.
+    // web-ifc settings for regular IFC conversion.
     //  - "./" wasm path → resolves next to the document for both vite dev
     //    and packaged file:// loads.
     //  - MEMORY_LIMIT defaults to 2 GiB; pushing past that on wasm32 causes
@@ -142,72 +185,55 @@ export class Viewer {
     //  - TAPE_SIZE bumped to 256 MiB.
     //  - IFCOPENINGELEMENT excluded — door/window holes balloon fragment
     //    counts on big files and aren't visible.
-    const IFCOPENINGELEMENT = 3588315303;
     const wasmConfig = {
       autoSetWasm: false,
       wasm: { path: "./", absolute: false },
-      excludedCategories: new Set<number>([IFCOPENINGELEMENT]),
       webIfc: {
         COORDINATE_TO_ORIGIN: true,
         TAPE_SIZE: 256 * 1024 * 1024,
       },
-    };
+    } satisfies Partial<OBC.IfcFragmentSettings>;
 
-    const ifcLoader = components.get(OBC.IfcLoader);
-    await ifcLoader.setup(wasmConfig as any);
-
-    const tiler = components.get(OBC.IfcGeometryTiler);
-    // The tiler exposes the same shape of settings as the loader.
-    Object.assign(tiler.settings, {
-      autoSetWasm: false,
-      wasm: { path: "./", absolute: false },
-      excludedCategories: new Set<number>([IFCOPENINGELEMENT]),
-      webIfc: {
-        COORDINATE_TO_ORIGIN: true,
-        TAPE_SIZE: 256 * 1024 * 1024,
-      },
+    const fragmentsManager = components.get(OBC.FragmentsManager);
+    fragmentsManager.init(fragmentsWorkerUrl);
+    // init() does not yield until the IFC loader setup below. Publish the
+    // initialized manager immediately so synchronous readiness probes cannot
+    // observe a partially initialized Viewer.
+    this.fragmentsManager = fragmentsManager;
+    fragmentsManager.list.onItemSet.add(({ value: model }) => {
+      model.useCamera(world.camera.three);
+      world.scene.three.add(model.object);
+      void fragmentsManager.core.update(true);
+    });
+    world.camera.controls.addEventListener("rest", () => {
+      void fragmentsManager.core.update(true);
     });
 
-    this.fragmentsManager = components.get(OBC.FragmentsManager);
-    this.classifier = components.get(OBC.Classifier);
-    this.hider = components.get(OBC.Hider);
-    this.indexer = components.get(OBC.IfcRelationsIndexer);
-
-    const streamer = components.get(OBF.IfcStreamer);
-    streamer.world = world;
-    streamer.url = ""; // overridden by our custom fetch below
-    // Resolve tile filenames against our in-memory map. The streamer expects
-    // a function that returns Response | File; a Response built from the
-    // Uint8Array is the simplest fit.
-    streamer.fetch = async (fileName: string) => {
-      const data = this.streamFiles.get(fileName);
-      if (!data) {
-        throw new Error(`stream tile not found: ${fileName}`);
-      }
-      // Cast through unknown — TS3 typings of Response don't accept
-      // Uint8Array<ArrayBufferLike> directly, but Chromium handles it fine.
-      return new Response(data as unknown as BlobPart as any);
-    };
+    const ifcLoader = components.get(OBC.IfcLoader);
+    await ifcLoader.setup(wasmConfig);
 
     const highlighter = components.get(OBF.Highlighter);
     highlighter.setup({
       world,
-      selectionColor: new THREE.Color("#f0883e"),
+      selectMaterialDefinition: {
+        color: new THREE.Color("#f0883e"),
+        renderedFaces: FRAGS.RenderedFaces.ONE,
+        opacity: 1,
+        transparent: false,
+        preserveOriginalMaterial: true,
+      },
     });
     highlighter.zoomToSelection = false;
-    if (highlighter.colors instanceof Map) {
-      highlighter.colors.set("select", new THREE.Color("#f0883e"));
-    }
 
     const selectEvents = highlighter.events["select"];
     if (selectEvents) {
-      selectEvents.onHighlight.add((fragmentIdMap) => {
-        const fragId = Object.keys(fragmentIdMap)[0];
-        if (!fragId) return;
-        const ids = fragmentIdMap[fragId];
+      selectEvents.onHighlight.add((modelIdMap) => {
+        const modelId = Object.keys(modelIdMap)[0];
+        if (!modelId) return;
+        const ids = modelIdMap[modelId];
         const expressId = ids?.values().next().value as number | undefined;
         if (expressId === undefined) return;
-        this.lastSelection = { fragmentId: fragId, expressId };
+        this.lastSelection = { fragmentId: modelId, expressId };
         this.onSelection.emit(this.lastSelection);
       });
       selectEvents.onClear.add(() => {
@@ -218,42 +244,14 @@ export class Viewer {
 
     const lengthMeasurement = components.get(OBF.LengthMeasurement);
     lengthMeasurement.world = world;
-    // The public snapDistance field is inert: LengthMeasurement builds its
-    // VertexPicker in its constructor, and the picker merges the value into a
-    // private config once and never re-reads it. Setting the picker's own
-    // config is the only thing that changes the actual pick radius. The field
-    // is set too, so the component doesn't misreport its own setting.
     lengthMeasurement.snapDistance = SNAP_DISTANCE_METRES;
-    const pickerConfig = this.getVertexPickerConfig(lengthMeasurement);
-    if (pickerConfig) {
-      pickerConfig.snapDistance = SNAP_DISTANCE_METRES;
-      pickerConfig.showOnlyVertex = false;
-    } else {
-      // @thatopen/components-front is pinned to ^2.4.0, so a minor bump could
-      // rename or restructure this private field. Degrade to the library's
-      // own default snap radius rather than throwing out of init() -- which
-      // would replace the whole document with the "3D engine failed to
-      // initialize" screen (see main.ts) over an optional tweak.
-      console.warn(
-        "LengthMeasurement._vertexPicker.config not found; snap radius left at the library default",
-      );
-    }
-    const picker = this.getVertexPicker(lengthMeasurement);
-    picker?.onVertexFound.add(() => this.setMeasureSnapActive(true));
-    picker?.onVertexLost.add(() => this.setMeasureSnapActive(false));
-
-    // SimpleDimensionLine renders `length / scale` with `rounding` decimals.
-    // Geometry is in metres, so 0.001 yields millimetres — matching the
-    // properties panel. Note this DIVIDES: 1000 here would render 5 m as 0 mm.
-    OBF.SimpleDimensionLine.scale = 0.001;
-    OBF.SimpleDimensionLine.units = "mm";
-    OBF.SimpleDimensionLine.rounding = 0;
+    lengthMeasurement.pickerSize = PICKER_SIZE_PX;
+    lengthMeasurement.units = "mm";
+    lengthMeasurement.rounding = 0;
 
     this.components = components;
     this.world = world;
     this.ifcLoader = ifcLoader;
-    this.tiler = tiler;
-    this.streamer = streamer;
     this.highlighter = highlighter;
     this.lengthMeasurement = lengthMeasurement;
   }
@@ -267,21 +265,25 @@ export class Viewer {
         : new Uint8Array(input);
 
     this.onLoadProgress.emit({ loaded: 0, total: buffer.byteLength });
-
-    if (buffer.byteLength > STREAM_THRESHOLD_BYTES) {
-      await this.loadIfcStreaming(buffer, name);
-    } else {
-      await this.loadIfcRegular(buffer, name);
-    }
+    await this.loadIfcRegular(buffer, name);
   }
 
   private async loadIfcRegular(
     buffer: Uint8Array,
     name: string,
   ): Promise<void> {
-    let model: FRAGS.FragmentsGroup;
+    let model: FRAGS.FragmentsModel;
     try {
-      model = await this.ifcLoader.load(buffer, true, name);
+      model = await this.ifcLoader.load(
+        buffer,
+        true,
+        `${name}-${crypto.randomUUID()}`,
+        {
+          instanceCallback: (importer) => {
+            importer.classes.elements.delete(IFCOPENINGELEMENT);
+          },
+        },
+      );
     } catch (err) {
       this.onLoadProgress.emit({
         loaded: buffer.byteLength,
@@ -290,23 +292,11 @@ export class Viewer {
       throw new Error(`IFC parse failed: ${(err as Error).message}`);
     }
 
-    if (this.currentModel) this.unloadIfc();
+    if (this.currentModel) await this.unloadIfc();
 
-    this.world.scene.three.add(model);
-    // The vertex picker behind LengthMeasurement raycasts against world.meshes
-    // (Raycasters.castRay defaults its item list to Array.from(world.meshes)),
-    // and nothing else populates it on this path. It must happen after the
-    // unload above, which clears the set -- populating earlier, e.g. from
-    // FragmentsManager.onFragmentsLoaded, gets wiped by the unload of the
-    // previous model. The streaming path needs nothing here: IfcStreamer adds
-    // each tile's mesh itself as it arrives.
-    for (const fragment of model.items) {
-      this.world.meshes.add(fragment.mesh);
-    }
     this.currentModel = model;
     this.currentFilename = name;
     this.currentIsStreamed = false;
-    this.relationsIndexing = null;
 
     this.onLoadProgress.emit({
       loaded: buffer.byteLength,
@@ -314,7 +304,7 @@ export class Viewer {
     });
 
     await this.openParameterReader(buffer);
-    this.classifyAndEmit(model, name, false);
+    await this.classifyAndEmit(model, name, false);
     this.fitToModel(model);
   }
 
@@ -332,128 +322,21 @@ export class Viewer {
     }
   }
 
-  private async loadIfcStreaming(
-    buffer: Uint8Array,
-    name: string,
-  ): Promise<void> {
-    // Tile the IFC. The tiler emits geometry chunks and assets via async
-    // events while it processes — it does NOT hold the whole result in
-    // memory the way IfcLoader does, which is why this works for files
-    // that crash the regular loader.
-    const tileFiles = new Map<string, Uint8Array>();
-    const assets: OBC.StreamedAsset[] = [];
-    const geometries: OBC.StreamedGeometries = {};
-    let geomFileIdx = 0;
-
-    const offGeom = this.tiler.onGeometryStreamed.add(
-      async ({ buffer: tileBuffer, data }) => {
-        const fileName = `geom-${geomFileIdx++}.frag`;
-        tileFiles.set(fileName, tileBuffer);
-        for (const [idStr, geom] of Object.entries(data)) {
-          (geometries as any)[Number(idStr)] = {
-            ...geom,
-            geometryFile: fileName,
-          };
-        }
-      },
-    );
-    const offAssets = this.tiler.onAssetStreamed.add(async (a) => {
-      assets.push(...a);
-    });
-    const offProgress = this.tiler.onProgress.add(async (pct) => {
-      // Map 0..1 → 0..byteLength so the existing progress UI works.
-      this.onLoadProgress.emit({
-        loaded: Math.floor(pct * buffer.byteLength),
-        total: buffer.byteLength,
-      });
-    });
-
-    try {
-      await this.tiler.streamFromBuffer(buffer);
-    } catch (err) {
-      throw new Error(`IFC tile failed: ${(err as Error).message}`);
-    } finally {
-      // Detach our event handlers so a future load doesn't double up.
-      try {
-        this.tiler.onGeometryStreamed.remove(offGeom as any);
-      } catch {
-        /* ignore */
-      }
-      try {
-        this.tiler.onAssetStreamed.remove(offAssets as any);
-      } catch {
-        /* ignore */
-      }
-      try {
-        this.tiler.onProgress.remove(offProgress as any);
-      } catch {
-        /* ignore */
-      }
-    }
-
-    // Hand the tiles to the streamer via our in-memory file map.
-    const previousStreamFiles = this.streamFiles;
-    this.streamFiles = tileFiles;
-
-    const settings = {
-      assets,
-      geometries,
-      globalDataFileId: name,
-    } as any;
-
-    let model: FRAGS.FragmentsGroup;
-    try {
-      model = await this.streamer.load(settings, true);
-    } catch (err) {
-      this.streamFiles = previousStreamFiles;
-      throw new Error(`Stream-load failed: ${(err as Error).message}`);
-    }
-
-    if (this.currentModel) {
-      this.streamFiles = previousStreamFiles;
-      this.unloadIfc();
-      this.streamFiles = tileFiles;
-    }
-
-    for (const fragment of model.items) {
-      this.world.meshes.add(fragment.mesh);
-    }
-    this.currentModel = model;
-    this.currentFilename = name;
-    this.currentIsStreamed = true;
-    this.relationsIndexing = null;
-
-    this.onLoadProgress.emit({
-      loaded: buffer.byteLength,
-      total: buffer.byteLength,
-    });
-
-    this.classifyAndEmit(model, name, true);
-    this.fitToModel(model);
-  }
-
-  private classifyAndEmit(
-    model: FRAGS.FragmentsGroup,
+  private async classifyAndEmit(
+    model: FRAGS.FragmentsModel,
     name: string,
     streamed: boolean,
-  ): void {
+  ): Promise<void> {
     let categories = new Map<string, ElementId[]>();
     try {
-      this.classifier.byEntity(model);
-      const entities = this.classifier.list["entities"] ?? {};
-      for (const [ifcClass, group] of Object.entries(entities)) {
-        const ids: ElementId[] = [];
-        const map = (group as any).map ?? {};
-        for (const fragId of Object.keys(map)) {
-          for (const expressId of map[fragId] as Iterable<number>) {
-            ids.push(expressId);
-          }
-        }
+      const names = await model.getCategories();
+      const byCategory = await model.getItemsOfCategories(
+        names.map((category) => new RegExp(`^${category}$`)),
+      );
+      for (const [ifcClass, ids] of Object.entries(byCategory)) {
         categories.set(ifcClass, ids);
       }
     } catch {
-      // For streamed models without properties, classification by entity
-      // may be limited. Leave the map empty in that case.
       categories = new Map();
     }
     this.currentCategories = categories;
@@ -469,8 +352,8 @@ export class Viewer {
     });
   }
 
-  private fitToModel(model: FRAGS.FragmentsGroup): void {
-    const box = new THREE.Box3().setFromObject(model);
+  private fitToModel(model: FRAGS.FragmentsModel): void {
+    const box = model.box;
     const size = box.getSize(new THREE.Vector3()).length();
     const center = box.getCenter(new THREE.Vector3());
     if (Number.isFinite(size) && size > 0) {
@@ -486,28 +369,24 @@ export class Viewer {
     }
   }
 
-  unloadIfc(): void {
-    if (!this.currentModel) return;
+  unloadIfc(): Promise<void> {
+    if (!this.currentModel) return Promise.resolve();
+    const model = this.currentModel;
     this.setMeasureMode(false);
     this.clearMeasurements();
-    this.world.scene.three.remove(this.currentModel);
-    try {
-      this.fragmentsManager.disposeGroup(this.currentModel);
-    } catch {
-      /* ignore */
-    }
-    this.world.meshes.clear();
+    this.world.scene.three.remove(model.object);
     this.paramReader?.close();
     this.paramReader = null;
-    this.streamFiles.clear();
     this.currentModel = null;
     this.currentCategories.clear();
     this.currentFilename = "";
     this.currentIsStreamed = false;
-    this.relationsIndexing = null;
     this.lastSelection = null;
     this.setClippingPlane(false);
     this.onModelUnloaded.emit();
+    return this.fragmentsManager.core.disposeModel(model.modelId).catch((err) => {
+      console.warn("fragment model disposal failed:", err);
+    });
   }
 
   getCategories(): ReadonlyMap<string, ElementId[]> {
@@ -522,10 +401,6 @@ export class Viewer {
     return this.currentIsStreamed;
   }
 
-  private get postFx(): OBF.Postproduction {
-    return this.ppRenderer.postproduction;
-  }
-
   /**
    * Toggle screen-space outline rendering.
    *
@@ -537,22 +412,22 @@ export class Viewer {
    * channel delta 151).
    */
   setEdges(on: boolean): void {
-    // The edge detection lives in CustomEffectsPass's shader and is active
-    // whenever that pass is in the composer, so adding/removing the pass is
-    // the toggle. Not customEffects.outlineEnabled -- that drives the
-    // selective per-mesh highlight overlay, which has nothing registered here
-    // and so renders nothing at all.
-    this.postFx.setPasses({ custom: on });
+    this.ppRenderer.postproduction.style = on
+      ? OBF.PostproductionAspect.COLOR_PEN
+      : OBF.PostproductionAspect.COLOR;
   }
 
   /** Read back off the renderer rather than a mirrored flag. */
   edgesOn(): boolean {
-    return this.postFx.settings.custom === true;
+    return (
+      this.ppRenderer.postproduction.style ===
+      OBF.PostproductionAspect.COLOR_PEN
+    );
   }
 
   /** Gloss is a library default we deliberately turn off. For tests. */
   debugGlossEnabled(): boolean {
-    return this.postFx.customEffects.glossEnabled;
+    return this.ppRenderer.postproduction.glossEnabled;
   }
 
   /** Renderer-level flag the clipper depends on. Exposed for regression tests. */
@@ -565,40 +440,13 @@ export class Viewer {
     return this.world.renderer?.three.clippingPlanes.length ?? 0;
   }
 
-  /**
-   * Reaches into LengthMeasurement's private VertexPicker config -- see the
-   * note in init() on why the public snapDistance field alone isn't enough.
-   * Returns null instead of throwing if the private shape has changed under
-   * us, so callers can degrade instead of crashing.
-   */
-  private getVertexPickerConfig(
-    lengthMeasurement: OBF.LengthMeasurement,
-  ): { snapDistance: number; showOnlyVertex?: boolean } | null {
-    const picker = this.getVertexPicker(lengthMeasurement);
-    return picker?.config ?? null;
-  }
-
-  private getVertexPicker(
-    lengthMeasurement: OBF.LengthMeasurement,
-  ): {
-    config?: { snapDistance: number; showOnlyVertex?: boolean };
-    onVertexFound: { add: (callback: () => void) => void };
-    onVertexLost: { add: (callback: () => void) => void };
-  } | null {
-    return (
-      lengthMeasurement as unknown as {
-        _vertexPicker?: {
-          config?: { snapDistance: number; showOnlyVertex?: boolean };
-          onVertexFound: { add: (callback: () => void) => void };
-          onVertexLost: { add: (callback: () => void) => void };
-        };
-      }
-    )._vertexPicker ?? null;
-  }
-
   /** Effective vertex-snap radius in metres. Exposed for regression tests. */
   debugSnapDistance(): number {
-    return this.getVertexPickerConfig(this.lengthMeasurement)?.snapDistance ?? NaN;
+    return this.lengthMeasurement.snapDistance;
+  }
+
+  debugFragmentsInitialized(): boolean {
+    return this.fragmentsManager.initialized;
   }
 
   /** Whether the live ruler cursor is currently snapped to a vertex. */
@@ -660,44 +508,53 @@ export class Viewer {
    * Anchors the first point, or completes the line on the second call. The
    * library's own `create` toggles between those two states.
    */
-  placeMeasurePoint(): void {
+  async placeMeasurePoint(): Promise<void> {
     if (!this.measureMode) return;
-    this.lengthMeasurement.create();
+    await this.lengthMeasurement.create();
   }
 
   clearMeasurements(): void {
-    this.lengthMeasurement.deleteAll();
+    this.lengthMeasurement.list.clear();
   }
 
   measurementCount(): number {
-    return this.lengthMeasurement.list.length;
+    return this.lengthMeasurement.list.size;
   }
 
   /** Adds a dimension between two world-space points, in metres. */
   measureBetween(a: Point3, b: Point3): void {
-    this.lengthMeasurement.createOnPoints(
-      new THREE.Vector3(a.x, a.y, a.z),
-      new THREE.Vector3(b.x, b.y, b.z),
+    this.lengthMeasurement.list.add(
+      new OBF.Line(
+        new THREE.Vector3(a.x, a.y, a.z),
+        new THREE.Vector3(b.x, b.y, b.z),
+      ),
     );
   }
 
-  setCategoryVisible(ifcClass: string, visible: boolean): void {
-    if (!this.currentModel) return;
-    const found = this.classifier.find({ entities: [ifcClass] });
-    if (Object.keys(found).length === 0) return;
-    this.hider.set(visible, found);
+  async setCategoryVisible(
+    ifcClass: string,
+    visible: boolean,
+  ): Promise<void> {
+    const model = this.currentModel;
+    const ids = this.currentCategories.get(ifcClass);
+    if (!model || !ids?.length) return;
+    await model.setVisible(ids, visible);
+    await this.fragmentsManager.core.update(true);
   }
 
-  isolateCategory(ifcClass: string): void {
-    for (const c of this.currentCategories.keys()) {
-      this.setCategoryVisible(c, c === ifcClass);
-    }
+  async isolateCategory(ifcClass: string): Promise<void> {
+    await Promise.all(
+      [...this.currentCategories.keys()].map((category) =>
+        this.setCategoryVisible(category, category === ifcClass),
+      ),
+    );
   }
 
-  showAllCategories(): void {
-    for (const c of this.currentCategories.keys()) {
-      this.setCategoryVisible(c, true);
-    }
+  async showAllCategories(): Promise<void> {
+    const model = this.currentModel;
+    if (!model) return;
+    await model.setVisible(undefined, true);
+    await this.fragmentsManager.core.update(true);
   }
 
   /**
@@ -719,63 +576,26 @@ export class Viewer {
   async getProperties(
     expressId: ElementId,
   ): Promise<Record<string, unknown> | null> {
-    if (!this.currentModel) return null;
+    const model = this.currentModel;
+    if (!model) return null;
     if (this.currentIsStreamed) return null; // properties not tiled in v1
-    const props = await this.currentModel.getProperties(expressId);
-    return (props as Record<string, unknown>) ?? null;
-  }
-
-  /**
-   * Build the relations index once per loaded model.
-   *
-   * IfcRelationsIndexer.process appends to its relation map rather than
-   * replacing it, so each extra call makes every element report another copy
-   * of its property sets -- the "cards piling up" symptom. A boolean guard is
-   * not sufficient: two selections in quick succession both pass the check
-   * before either finishes indexing. Callers share one in-flight promise
-   * instead. Kept lazy so a model that is never inspected doesn't pay for it.
-   */
-  private ensureRelationsIndexed(): Promise<void> {
-    if (!this.relationsIndexing) {
-      const model = this.currentModel!;
-      this.relationsIndexing = Promise.resolve(
-        this.indexer.process(model) as unknown,
-      ).then(
-        () => undefined,
-        // A failed index must not wedge the properties panel forever.
-        () => undefined,
-      );
-    }
-    return this.relationsIndexing;
+    const [item] = await model.getItemsData([expressId]);
+    return item ? itemDataToProperties(item) : null;
   }
 
   async getPropertySets(expressId: ElementId): Promise<IfcSet[]> {
-    if (!this.currentModel) return [];
-    if (this.currentIsStreamed) return [];
-    await this.ensureRelationsIndexed();
-    let psetIds: number[] = [];
-    try {
-      psetIds =
-        this.indexer.getEntityRelations(
-          this.currentModel,
-          expressId,
-          "IsDefinedBy",
-        ) ?? [];
-    } catch {
-      psetIds = [];
-    }
     const model = this.currentModel;
-    const resolve: EntityResolver = (id) => model.getProperties(id) as any;
-
-    const out: IfcSet[] = [];
-    for (const id of psetIds) {
-      const set = (await model.getProperties(id)) as any;
-      if (!set) continue;
-      // Handles IfcPropertySet and IfcElementQuantity alike -- they keep
-      // their contents in different attributes. See src/ifc-sets.ts.
-      out.push(await collectSet(set, resolve, id));
-    }
-    return out;
+    if (!model) return [];
+    if (this.currentIsStreamed) return [];
+    const [item] = await model.getItemsData([expressId], {
+      attributesDefault: true,
+      relations: {
+        IsDefinedBy: { attributes: true, relations: true },
+        DefinesOccurrence: { attributes: false, relations: false },
+      },
+    });
+    if (!item) return [];
+    return relatedItems(item, "IsDefinedBy").map(fragmentPropertySet);
   }
 
   /**
@@ -815,26 +635,17 @@ export class Viewer {
 
   getModelHeightRange(): { min: number; max: number } | null {
     if (!this.currentModel) return null;
-    const box = new THREE.Box3().setFromObject(this.currentModel);
+    const box = this.currentModel.box;
     if (!Number.isFinite(box.min.y) || !Number.isFinite(box.max.y)) return null;
     return { min: box.min.y, max: box.max.y };
   }
 
   async fitToSelection(): Promise<void> {
-    if (!this.currentModel) return;
-    const box = new THREE.Box3();
+    const model = this.currentModel;
+    if (!model) return;
+    let box = model.box;
     if (this.lastSelection) {
-      const fragment = this.fragmentsManager.list.get(
-        this.lastSelection.fragmentId,
-      );
-      const mesh = (fragment as any)?.mesh;
-      if (mesh) {
-        box.setFromObject(mesh);
-      } else {
-        box.setFromObject(this.currentModel);
-      }
-    } else {
-      box.setFromObject(this.currentModel);
+      box = await model.getMergedBox([this.lastSelection.expressId]);
     }
     const size = box.getSize(new THREE.Vector3()).length();
     const center = box.getCenter(new THREE.Vector3());

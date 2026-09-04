@@ -18,8 +18,8 @@ export function mountCategories(viewer: Viewer): void {
     header.appendChild(showAll);
     root.appendChild(header);
 
-    showAll.addEventListener("click", () => {
-      viewer.showAllCategories();
+    showAll.addEventListener("click", async () => {
+      await viewer.showAllCategories();
       for (const cb of root.querySelectorAll<HTMLInputElement>(
         "input[type=checkbox]",
       )) {
@@ -48,9 +48,9 @@ function renderRow(viewer: Viewer, name: string, count: number): HTMLElement {
   const cb = document.createElement("input");
   cb.type = "checkbox";
   cb.checked = true;
-  cb.addEventListener("change", () =>
-    viewer.setCategoryVisible(name, cb.checked),
-  );
+  cb.addEventListener("change", async () => {
+    await viewer.setCategoryVisible(name, cb.checked);
+  });
 
   const label = document.createElement("span");
   label.textContent = `${name} (${count})`;
@@ -62,8 +62,8 @@ function renderRow(viewer: Viewer, name: string, count: number): HTMLElement {
   isoBtn.className = "mini";
   isoBtn.textContent = "iso";
   isoBtn.title = "Isolate (hide all others)";
-  isoBtn.addEventListener("click", () => {
-    viewer.isolateCategory(name);
+  isoBtn.addEventListener("click", async () => {
+    await viewer.isolateCategory(name);
     const all = row.parentElement!.querySelectorAll<HTMLInputElement>(
       "input[type=checkbox]",
     );
