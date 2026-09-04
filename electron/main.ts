@@ -1,3 +1,4 @@
+import { IfcPreprocessorService, UtilityProcessConverter } from "./ifc-preprocessor";
 import { app, BrowserWindow, ipcMain, dialog } from "electron";
 import * as path from "path";
 import * as fs from "fs";
@@ -110,3 +111,27 @@ ipcMain.handle(
     await writeWorkbook(filePath, model);
   },
 );
+
+const cacheDir = path.join(app.getPath("userData"), "ifc-cache");
+const wasmDir = isDev
+  ? path.join(__dirname, "../public")
+  : path.join(process.resourcesPath, "public");
+const workerPath = path.join(__dirname, "ifc-preprocess-worker.js");
+const converter = new UtilityProcessConverter(workerPath, wasmDir);
+const preprocessor = new IfcPreprocessorService(cacheDir, converter);
+
+ipcMain.handle("ifc:get-size", async (_event, filePath: string) => {
+  return preprocessor.getFileSize(filePath);
+});
+
+ipcMain.handle("ifc:prepare", async (event, filePath: string) => {
+  return preprocessor.prepare(filePath, (progress) => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send("ifc:progress", progress);
+    }
+  });
+});
+
+ipcMain.handle("ifc:read-prepared", async (_event, cacheId: string) => {
+  return preprocessor.readPrepared(cacheId);
+});
