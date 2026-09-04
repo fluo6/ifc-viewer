@@ -145,6 +145,16 @@ export class Viewer {
    */
   private paramReader: IfcParameterReader | null = null;
   private initialized = false;
+  private edgesPreference = false;
+  private hiddenLines = false;
+
+  private applyRenderStyle(): void {
+    this.ppRenderer.postproduction.style = this.hiddenLines
+      ? OBF.PostproductionAspect.PEN
+      : this.edgesPreference
+        ? OBF.PostproductionAspect.COLOR_PEN
+        : OBF.PostproductionAspect.COLOR;
+  }
 
   async init(container: HTMLElement): Promise<void> {
     const components = new OBC.Components();
@@ -476,17 +486,17 @@ export class Viewer {
    * channel delta 151).
    */
   setEdges(on: boolean): void {
-    this.ppRenderer.postproduction.style = on
-      ? OBF.PostproductionAspect.COLOR_PEN
-      : OBF.PostproductionAspect.COLOR;
+    this.edgesPreference = on;
+    if (!this.hiddenLines) this.applyRenderStyle();
   }
 
-  /** Read back off the renderer rather than a mirrored flag. */
   edgesOn(): boolean {
-    return (
-      this.ppRenderer.postproduction.style ===
-      OBF.PostproductionAspect.COLOR_PEN
-    );
+    return this.edgesPreference;
+  }
+
+  debugPostproductionStyle(): string {
+    const style = this.ppRenderer.postproduction.style;
+    return OBF.PostproductionAspect[style] ?? String(style);
   }
 
   /** Gloss is a library default we deliberately turn off. For tests. */

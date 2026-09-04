@@ -41,15 +41,25 @@ test("enabling edges visibly changes the render, and toggling off restores it", 
     const page = await loaded(app);
     const viewport = page.locator("#viewport");
 
+    expect(
+      await page.evaluate(() => (window as any).__viewer.debugPostproductionStyle()),
+    ).toBe("COLOR");
+
     const baseline = await settled(page, viewport);
 
     await page.evaluate(() => (window as any).__viewer.setEdges(true));
+    expect(
+      await page.evaluate(() => (window as any).__viewer.debugPostproductionStyle()),
+    ).toBe("COLOR_PEN");
     expect(
       (await settled(page, viewport)).equals(baseline),
       "the render is unchanged with edges on, so no outlines are being drawn",
     ).toBe(false);
 
     await page.evaluate(() => (window as any).__viewer.setEdges(false));
+    expect(
+      await page.evaluate(() => (window as any).__viewer.debugPostproductionStyle()),
+    ).toBe("COLOR");
     expect(
       (await settled(page, viewport)).equals(baseline),
       "turning edges off did not restore the original render",
