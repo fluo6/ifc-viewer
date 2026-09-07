@@ -302,14 +302,28 @@ export class Viewer {
     highlighter.setup({
       world,
       selectMaterialDefinition: {
-        color: new THREE.Color("#f0883e"),
+        color: new THREE.Color("#0080ff"),
         renderedFaces: FRAGS.RenderedFaces.ONE,
         opacity: 1,
         transparent: false,
         preserveOriginalMaterial: true,
+        ...({ _explicitProps: ["color", "opacity", "transparent"] } as any),
       },
     });
     highlighter.zoomToSelection = false;
+
+    const origUpdateColors = highlighter.updateColors.bind(highlighter);
+    highlighter.updateColors = async () => {
+      await origUpdateColors();
+      if (this.xrayMode && this.currentModel) {
+        await this.currentModel.setOpacity(undefined, 0.4);
+        if (this.lastSelection) {
+          await this.currentModel.setOpacity([this.lastSelection.expressId], 1);
+        }
+        await this.fragmentsManager.core.update(true);
+      }
+      this.world?.renderer?.update();
+    };
 
     const selectEvents = highlighter.events["select"];
     if (selectEvents) {
@@ -640,6 +654,11 @@ export class Viewer {
     this.clearMeasurements();
     this.clearModelBackEdges();
     this.clearSelectionBackEdges();
+    try {
+      void this.highlighter?.clear("select");
+    } catch {
+      /* ignore */
+    }
     // Reset X-Ray state without waiting (model will be disposed anyway)
     if (this.xrayMode) {
       this.xrayMode = false;
@@ -953,14 +972,14 @@ export class Viewer {
     if (!geometryParts || geometryParts.length === 0) return;
 
     const solidMat = new THREE.LineBasicMaterial({
-      color: 0x4a90d9,
+      color: 0x0080ff,
       depthFunc: THREE.LessEqualDepth,
       depthWrite: false,
       transparent: true,
       opacity: 0.9,
     });
     const dashedMat = new THREE.LineDashedMaterial({
-      color: 0x4a90d9,
+      color: 0x0080ff,
       depthFunc: THREE.GreaterDepth,
       depthWrite: false,
       transparent: true,
@@ -1306,6 +1325,31 @@ export class Viewer {
     }
     if (!Number.isFinite(box.min.y) || !Number.isFinite(box.max.y) || box.isEmpty()) return null;
     return { min: box.min.y, max: box.max.y };
+  }
+
+  getSelection(): Selection | null {
+    return this.lastSelection;
+  }
+
+  async select(expressId: number | null): Promise<void> {
+    if (expressId == null) {
+      await this.clearSelection();
+      return;
+    }
+    const model = this.currentModel;
+    if (!model) return;
+    await this.highlighter.highlightByID(
+      "select",
+      { [model.modelId]: new Set([expressId]) },
+      true,
+    );
+  }
+
+  async clearSelection(): Promise<void> {
+    await this.highlighter.clear("select");
+    this.clearSelectionBackEdges();
+    this.lastSelection = null;
+    this.onSelection.emit(null);
   }
 
   async fitToSelection(): Promise<void> {
