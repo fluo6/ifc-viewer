@@ -24,6 +24,11 @@ export interface LoadProgress {
   total: number;
 }
 
+export interface LoadStarted {
+  filename: string;
+  size?: number;
+}
+
 export interface Selection {
   fragmentId: string;
   expressId: ElementId;
@@ -111,8 +116,12 @@ export class Viewer {
   readonly onModelUnloaded = new Emitter<void>();
   readonly onSelection = new Emitter<Selection | null>();
   readonly onLoadProgress = new Emitter<LoadProgress>();
+  readonly onLoadStarted = new Emitter<LoadStarted>();
   readonly onMeasureModeChanged = new Emitter<boolean>();
   readonly onMeasureSnapChanged = new Emitter<boolean>();
+  readonly onGridVisibleChanged = new Emitter<boolean>();
+  readonly onBackEdgesChanged = new Emitter<boolean>();
+  readonly onXrayChanged = new Emitter<boolean>();
 
   private components!: OBC.Components;
   private world!: OBC.SimpleWorld<
@@ -124,6 +133,13 @@ export class Viewer {
   // methods can reach .postproduction -- SimpleWorld types the slot as
   // SimpleRenderer.
   private ppRenderer!: OBF.PostproductionRenderer;
+  private grid!: OBC.SimpleGrid;
+  private dashedEdgesGroup = new THREE.Group();
+  private modelBackEdgesGroup = new THREE.Group();
+  private selectionBackEdgesGroup = new THREE.Group();
+  private backEdgesEnabled = false;
+  private modelBackEdgesBuilt = false;
+  private xrayMode = false;
   private ifcLoader!: OBC.IfcLoader;
   private fragmentsManager!: OBC.FragmentsManager;
   private highlighter!: OBF.Highlighter;
@@ -159,6 +175,24 @@ export class Viewer {
       : this.edgesPreference
         ? OBF.PostproductionAspect.COLOR_PEN
         : OBF.PostproductionAspect.COLOR;
+    this.updateBackEdgesMaterial();
+  }
+
+  private updateBackEdgesMaterial(): void {
+    if (!this.modelBackEdgesGroup) return;
+    const isPen = this.hiddenLines;
+    for (const child of this.modelBackEdgesGroup.children) {
+      const ls = child as THREE.LineSegments;
+      if (ls.material) {
+        const mat = ls.material as THREE.LineDashedMaterial;
+        if (mat.isLineDashedMaterial) {
+          mat.color.setHex(isPen ? 0x475569 : 0x94a3b8);
+          mat.opacity = isPen ? 0.70 : 0.65;
+          mat.needsUpdate = true;
+        }
+      }
+    }
+    this.world?.renderer?.update();
   }
 
   async init(container: HTMLElement): Promise<void> {
@@ -192,7 +226,39 @@ export class Viewer {
     world.camera.controls.setLookAt(20, 20, 20, 0, 0, 0);
 
     const grids = components.get(OBC.Grids);
-    grids.create(world);
+    this.grid = grids.create(world);
+    const grid = this.grid;
+
+    this.dashedEdgesGroup.name = "dashed-back-edges";
+    this.modelBackEdgesGroup.name = "model-back-edges";
+    this.selectionBackEdgesGroup.name = "selection-back-edges";
+    this.dashedEdgesGroup.add(this.modelBackEdgesGroup);
+    this.dashedEdgesGroup.add(this.selectionBackEdgesGroup);
+    world.scene.three.add(this.dashedEdgesGroup);
+
+    // The ground grid uses a shader plane. During the edge-detection pass, Sobel filtering
+    // on the grid's lines produces severe artifacts (thick double-lines, moiré at the horizon,
+    // and cutting through solid meshes). Temporarily hiding the grid during the edge pass
+    // keeps the ground grid clean and smooth in COLOR_PEN mode, and avoids rendering a giant
+    // black cage over the screen in PEN (Hidden lines) mode.
+    const edgesPass = renderer.postproduction.edgesPass as any;
+    const originalEdgesRender = edgesPass.render.bind(edgesPass);
+    edgesPass.render = (
+      rendererInstance: any,
+      writeBuffer: any,
+      readBuffer: any,
+    ) => {
+      const wasVisible = this.grid.three.visible;
+      const wasDashedVisible = this.dashedEdgesGroup.visible;
+      this.grid.three.visible = false;
+      this.dashedEdgesGroup.visible = false;
+      try {
+        originalEdgesRender(rendererInstance, writeBuffer, readBuffer);
+      } finally {
+        this.grid.three.visible = wasVisible;
+        this.dashedEdgesGroup.visible = wasDashedVisible;
+      }
+    };
 
     // web-ifc settings for regular IFC conversion.
     //  - "./" wasm path → resolves next to the document for both vite dev
@@ -223,6 +289,9 @@ export class Viewer {
       void fragmentsManager.core.update(true);
     });
     world.camera.controls.addEventListener("rest", () => {
+      if (this.currentModel) {
+        this.currentModel.useCamera(world.camera.three);
+      }
       void fragmentsManager.core.update(true);
     });
 
@@ -252,10 +321,12 @@ export class Viewer {
         if (expressId === undefined) return;
         this.lastSelection = { fragmentId: modelId, expressId };
         this.onSelection.emit(this.lastSelection);
+        void this.updateSelectionBackEdges(expressId);
       });
       selectEvents.onClear.add(() => {
         this.lastSelection = null;
         this.onSelection.emit(null);
+        this.clearSelectionBackEdges();
       });
     }
 
@@ -276,6 +347,9 @@ export class Viewer {
       dom.addEventListener("click", (e) =>
         (raycaster as any).mouse.updateMouseInfo(e),
       );
+      dom.addEventListener("dblclick", () => {
+        if (this.currentModel) void this.zoomToFit(true);
+      });
     }
 
     this.components = components;
@@ -289,6 +363,7 @@ export class Viewer {
   async loadIfcPath(filePath: string): Promise<void> {
     const filename = filePath.split(/[\\/]/).pop() ?? "model.ifc";
     const fileSize = await window.electron.getIfcFileSize(filePath);
+    this.onLoadStarted.emit({ filename, size: fileSize });
 
     if (fileSize <= LARGE_IFC_THRESHOLD_BYTES) {
       const buf = await window.electron.readFile(filePath);
@@ -312,7 +387,7 @@ export class Viewer {
       unsubscribe?.();
     }
 
-    const modelId = `${filename}-${crypto.randomUUID()}`;
+    const modelId = `${filename}-${THREE.MathUtils.generateUUID()}`;
     const newModel = await this.fragmentsManager.core.load(
       new Uint8Array(fragmentBuffer),
       {
@@ -331,7 +406,7 @@ export class Viewer {
 
     this.onLoadProgress.emit({ loaded: 100, total: 100 });
     await this.classifyAndEmit(newModel, filename, true);
-    this.fitToModel(newModel);
+    await this.fitToModel(newModel, false);
   }
 
   async loadIfc(input: File | ArrayBuffer, filename?: string): Promise<void> {
@@ -342,7 +417,12 @@ export class Viewer {
         ? new Uint8Array(await input.arrayBuffer())
         : new Uint8Array(input);
 
+    this.onLoadStarted.emit({ filename: name, size: buffer.byteLength });
     this.onLoadProgress.emit({ loaded: 0, total: buffer.byteLength });
+
+    // Yield briefly so browser paints the loading state before synchronous WASM blocks main thread
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
     await this.loadIfcRegular(buffer, name);
   }
 
@@ -355,14 +435,26 @@ export class Viewer {
       model = await this.ifcLoader.load(
         buffer,
         true,
-        `${name}-${crypto.randomUUID()}`,
+        `${name}-${THREE.MathUtils.generateUUID()}`,
         {
+          processData: {
+            progressCallback: (progress: number, data?: any) => {
+              const pct = Math.round(progress * 100);
+              const stage = data?.process ? ` [${data.process}]` : "";
+              console.log(`[IFC] Parsing & converting: ${pct}%${stage}`);
+              this.onLoadProgress.emit({
+                loaded: Math.round(progress * buffer.byteLength),
+                total: buffer.byteLength,
+              });
+            },
+          },
           instanceCallback: (importer) => {
             importer.classes.elements.delete(IFCOPENINGELEMENT);
           },
         },
       );
     } catch (err) {
+      console.error("[IFC] Parsing error:", err);
       this.onLoadProgress.emit({
         loaded: buffer.byteLength,
         total: buffer.byteLength,
@@ -384,7 +476,7 @@ export class Viewer {
     await this.fragmentsManager.core.update(true);
     await this.openParameterReader(buffer);
     await this.classifyAndEmit(model, name, false);
-    this.fitToModel(model);
+    await this.fitToModel(model, false);
   }
 
   /**
@@ -431,22 +523,114 @@ export class Viewer {
     });
   }
 
-  private fitToModel(model: FRAGS.FragmentsModel): void {
-    const box = model.box;
-    const size = box.getSize(new THREE.Vector3()).length();
-    const center = box.getCenter(new THREE.Vector3());
-    if (Number.isFinite(size) && size > 0) {
-      this.world.camera.controls.setLookAt(
-        center.x + size,
-        center.y + size,
-        center.z + size,
-        center.x,
-        center.y,
-        center.z,
-        false,
-      );
-      this.world.camera.controls.update(0.016);
+  async fitToModel(
+    model?: FRAGS.FragmentsModel | null,
+    transition = false,
+  ): Promise<void> {
+    const targetModel = model ?? this.currentModel;
+    if (!targetModel) return;
+
+    targetModel.object.updateMatrixWorld(true);
+
+    let box: THREE.Box3 = targetModel.box;
+    const testVec = new THREE.Vector3();
+    let size = box ? box.getSize(testVec) : null;
+    let len = size ? size.length() : 0;
+
+    if (!size || !Number.isFinite(len) || len === 0 || box.isEmpty()) {
+      box = new THREE.Box3().setFromObject(targetModel.object);
+      size = box.getSize(testVec);
+      len = size.length();
     }
+
+    if (!size || !Number.isFinite(len) || len === 0 || box.isEmpty()) {
+      targetModel.object.traverse((child) => {
+        if ((child as any).geometry) {
+          (child as any).geometry.computeBoundingBox?.();
+          const geomBox = (child as any).geometry.boundingBox as THREE.Box3 | undefined;
+          if (geomBox) {
+            const worldGeomBox = geomBox.clone().applyMatrix4(child.matrixWorld);
+            if (box.isEmpty()) {
+              box.copy(worldGeomBox);
+            } else {
+              box.union(worldGeomBox);
+            }
+          }
+        }
+      });
+      size = box.getSize(testVec);
+      len = size.length();
+    }
+
+    if (!Number.isFinite(len) || len === 0 || box.isEmpty()) {
+      console.warn("[IFC] Model bounding box is empty or zero size for model:", targetModel);
+      return;
+    }
+
+    const center = box.getCenter(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z, 0.1);
+
+    if (this.grid?.three) {
+      // Place the ground grid at the base of the model (box.min.y) so it sits under the building
+      // rather than cutting through upper storeys or appearing above negative-elevation structures.
+      // Offset slightly downwards by 0.01 to prevent z-fighting with the bottom slab/foundation faces.
+      this.grid.three.position.y = box.min.y - 0.01;
+      if (this.grid.material?.uniforms?.uDistance) {
+        this.grid.material.uniforms.uDistance.value = Math.max(500, maxDim * 5);
+      }
+    }
+
+    // Dynamically adjust near and far clipping planes so models of ANY scale
+    // (from millimetres up to kilometres or large survey coordinates) are fully visible without clipping.
+    const camera = this.world.camera.three;
+    const requiredFar = Math.max(10000, maxDim * 50, center.length() + maxDim * 10);
+    const requiredNear = Math.min(0.1, Math.max(0.001, maxDim / 5000));
+
+    if (camera.far < requiredFar) {
+      camera.far = requiredFar;
+    }
+    if (camera.near > requiredNear) {
+      camera.near = requiredNear;
+    }
+    camera.updateProjectionMatrix();
+
+    const controls = this.world.camera.controls;
+    controls.maxDistance = Math.max(controls.maxDistance, camera.far * 0.8);
+    controls.minDistance = Math.min(controls.minDistance, camera.near * 2);
+
+    const fovRad = THREE.MathUtils.degToRad(
+      camera instanceof THREE.PerspectiveCamera ? camera.fov : 60,
+    );
+    const dist = (maxDim / 2) / Math.tan(fovRad / 2);
+    const offset = Math.max(len, dist);
+
+    console.log(
+      `[IFC] Auto zoom to fit: center=(${center.x.toFixed(2)}, ${center.y.toFixed(2)}, ${center.z.toFixed(2)}), ` +
+      `dimensions=(${size.x.toFixed(2)}, ${size.y.toFixed(2)}, ${size.z.toFixed(2)}), ` +
+      `distance=${dist.toFixed(2)}, far=${camera.far}, gridY=${this.grid?.three?.position.y?.toFixed(2) ?? 0}`,
+    );
+
+    await controls.setLookAt(
+      center.x + offset,
+      center.y + offset,
+      center.z + offset,
+      center.x,
+      center.y,
+      center.z,
+      transition,
+    );
+
+    controls.update(0.016);
+    targetModel.useCamera(camera);
+    await this.fragmentsManager.core.update(true);
+    if (this.backEdgesEnabled) {
+      await this.buildModelBackEdges();
+    }
+    this.world.renderer?.update();
+  }
+
+  zoomToFit(transition = true): Promise<void> {
+    return this.fitToModel(this.currentModel, transition);
   }
 
   unloadIfc(): Promise<void> {
@@ -454,7 +638,20 @@ export class Viewer {
     const model = this.currentModel;
     this.setMeasureMode(false);
     this.clearMeasurements();
+    this.clearModelBackEdges();
+    this.clearSelectionBackEdges();
+    // Reset X-Ray state without waiting (model will be disposed anyway)
+    if (this.xrayMode) {
+      this.xrayMode = false;
+      this.onXrayChanged.emit(false);
+    }
     this.world.scene.three.remove(model.object);
+    if (this.grid?.three) {
+      this.grid.three.position.y = 0;
+      if (this.grid.material?.uniforms?.uDistance) {
+        this.grid.material.uniforms.uDistance.value = 500;
+      }
+    }
     this.paramReader?.close();
     this.paramReader = null;
     this.currentModel = null;
@@ -468,6 +665,7 @@ export class Viewer {
       console.warn("fragment model disposal failed:", err);
     });
   }
+
 
   getCategories(): ReadonlyMap<string, ElementId[]> {
     return this.currentCategories;
@@ -500,9 +698,16 @@ export class Viewer {
     return this.edgesPreference;
   }
 
-  setHiddenLines(on: boolean): void {
+  async setHiddenLines(on: boolean): Promise<void> {
     this.hiddenLines = on;
     this.applyRenderStyle();
+    if (on) {
+      this.modelBackEdgesGroup.visible = true;
+      await this.buildModelBackEdges();
+    } else {
+      this.modelBackEdgesGroup.visible = this.backEdgesEnabled;
+      this.world?.renderer?.update();
+    }
   }
 
   hiddenLinesOn(): boolean {
@@ -548,6 +753,348 @@ export class Viewer {
     cacheHit: boolean;
   } | null {
     return this.lastPreparedResult;
+  }
+
+  setGridVisible(visible: boolean): void {
+    if (this.grid) {
+      this.grid.visible = visible;
+      this.onGridVisibleChanged.emit(visible);
+      this.world?.renderer?.update();
+    }
+  }
+
+  isGridVisible(): boolean {
+    return this.grid?.visible ?? false;
+  }
+
+  getGridElevation(): number {
+    return this.grid?.three?.position.y ?? 0;
+  }
+
+  setGridElevation(y: number): void {
+    if (this.grid?.three) {
+      this.grid.three.position.y = y;
+      this.world?.renderer?.update();
+    }
+  }
+
+  debugGridElevation(): number {
+    return this.getGridElevation();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Dashed back-edges (whole model + selected element)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Build LineDashedMaterial line segments from all meshes in the model and
+   * render them with depthFunc=GreaterDepth so they show as dashed lines through
+   * occluding surfaces (matching Google SketchUp "Back Edges" style, shortcut B/K).
+   * Cached after the first build; toggles are instantaneous.
+   */
+  private async buildModelBackEdges(): Promise<void> {
+    if (!this.currentModel) return;
+    if (this.modelBackEdgesBuilt) {
+      this.modelBackEdgesGroup.visible = true;
+      this.world?.renderer?.update();
+      return;
+    }
+
+    this.clearModelBackEdges();
+
+    const model = this.currentModel;
+    const modelObj = model.object;
+    modelObj.updateMatrixWorld(true);
+
+    let box = model.box;
+    if (!box || box.isEmpty()) {
+      box = new THREE.Box3().setFromObject(modelObj);
+    }
+    const testVec = new THREE.Vector3();
+    const size = box.getSize(testVec);
+    const maxDim = Math.max(size.x, size.y, size.z, 1);
+    const dashSize = Math.max(0.04, Math.min(0.25, maxDim / 150));
+    const gapSize = dashSize * 0.6;
+
+    const isPen = this.hiddenLines;
+    const dashedMat = new THREE.LineDashedMaterial({
+      color: isPen ? 0x475569 : 0x94a3b8,
+      depthFunc: THREE.GreaterDepth,
+      depthWrite: false,
+      transparent: true,
+      opacity: isPen ? 0.70 : 0.65,
+      dashSize,
+      gapSize,
+    });
+
+    let geometryParts: any[][];
+    try {
+      const ids = await model.getItemsIds();
+      geometryParts = await model.getItemsGeometry(ids);
+    } catch (err) {
+      console.warn("[IFC] Failed to retrieve model geometries for back edges:", err);
+      return;
+    }
+
+    if (!geometryParts || geometryParts.length === 0) return;
+
+    // Collect all EdgesGeometry position buffers
+    const edgePositionArrays: Float32Array[] = [];
+    let totalFloats = 0;
+
+    for (const parts of geometryParts) {
+      for (const part of parts) {
+        const positions: Float32Array = part.positions;
+        const indices: Uint32Array = part.indices;
+        const transform: any = part.transform;
+        if (!positions || !indices || positions.length === 0) continue;
+
+        try {
+          const triGeom = new THREE.BufferGeometry();
+          triGeom.setAttribute(
+            "position",
+            new THREE.BufferAttribute(new Float32Array(positions), 3),
+          );
+          triGeom.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
+
+          const mat4 = new THREE.Matrix4();
+          if (transform) {
+            if (Array.isArray(transform) && transform.length >= 16) {
+              mat4.fromArray(transform);
+            } else if (transform.elements && transform.elements.length >= 16) {
+              mat4.fromArray(transform.elements);
+            }
+          }
+          triGeom.applyMatrix4(mat4);
+          triGeom.applyMatrix4(modelObj.matrixWorld);
+
+          const edgesGeom = new THREE.EdgesGeometry(triGeom, 24);
+          triGeom.dispose();
+
+          const posAttr = edgesGeom.attributes.position;
+          if (posAttr && posAttr.count > 0) {
+            const arr = posAttr.array as Float32Array;
+            edgePositionArrays.push(arr);
+            totalFloats += arr.length;
+          }
+        } catch (err) {
+          console.warn("[IFC] Failed to build back edges for part:", err);
+        }
+      }
+    }
+
+    if (totalFloats > 0) {
+      const mergedArray = new Float32Array(totalFloats);
+      let offset = 0;
+      for (const arr of edgePositionArrays) {
+        mergedArray.set(arr, offset);
+        offset += arr.length;
+      }
+      const combinedGeom = new THREE.BufferGeometry();
+      const posAttr = new THREE.BufferAttribute(mergedArray, 3);
+      combinedGeom.setAttribute("position", posAttr);
+
+      // Compute line distances per segment so every edge has crisp dashes from the start
+      const distances = new Float32Array(totalFloats / 3);
+      const vA = new THREE.Vector3();
+      const vB = new THREE.Vector3();
+      for (let i = 0; i < posAttr.count; i += 2) {
+        vA.fromBufferAttribute(posAttr, i);
+        vB.fromBufferAttribute(posAttr, i + 1);
+        distances[i] = 0;
+        distances[i + 1] = vA.distanceTo(vB);
+      }
+      combinedGeom.setAttribute(
+        "lineDistance",
+        new THREE.BufferAttribute(distances, 1),
+      );
+
+      const line = new THREE.LineSegments(combinedGeom, dashedMat);
+      line.renderOrder = 2;
+      this.modelBackEdgesGroup.add(line);
+    }
+
+    this.modelBackEdgesBuilt = true;
+    this.modelBackEdgesGroup.visible = this.backEdgesEnabled || this.hiddenLines;
+    this.world?.renderer?.update();
+  }
+
+  /** Remove and dispose all cached model-wide dashed back-edge line segments. */
+  clearModelBackEdges(): void {
+    const group = this.modelBackEdgesGroup;
+    for (const child of [...group.children]) {
+      const ls = child as THREE.LineSegments;
+      ls.geometry?.dispose();
+      if (Array.isArray(ls.material)) {
+        ls.material.forEach((m) => m.dispose());
+      } else {
+        (ls.material as THREE.Material)?.dispose();
+      }
+      group.remove(child);
+    }
+    this.modelBackEdgesBuilt = false;
+    this.modelBackEdgesGroup.visible = false;
+    this.world?.renderer?.update();
+  }
+
+  /**
+   * Build LineDashedMaterial line segments for the selected element in accent color.
+   */
+  async updateSelectionBackEdges(expressId?: number | null): Promise<void> {
+    this.clearSelectionBackEdges();
+    if (!this.backEdgesEnabled || !this.currentModel || expressId == null) return;
+
+    let geometryParts: any[][];
+    try {
+      geometryParts = await this.currentModel.getItemsGeometry([expressId]);
+    } catch {
+      return;
+    }
+    if (!geometryParts || geometryParts.length === 0) return;
+
+    const solidMat = new THREE.LineBasicMaterial({
+      color: 0x4a90d9,
+      depthFunc: THREE.LessEqualDepth,
+      depthWrite: false,
+      transparent: true,
+      opacity: 0.9,
+    });
+    const dashedMat = new THREE.LineDashedMaterial({
+      color: 0x4a90d9,
+      depthFunc: THREE.GreaterDepth,
+      depthWrite: false,
+      transparent: true,
+      opacity: 0.6,
+      dashSize: 0.1,
+      gapSize: 0.06,
+    });
+
+    for (const parts of geometryParts) {
+      for (const part of parts) {
+        const positions: Float32Array = part.positions;
+        const indices: Uint32Array = part.indices;
+        const transform: any = part.transform;
+        if (!positions || !indices || positions.length === 0) continue;
+
+        const triGeom = new THREE.BufferGeometry();
+        triGeom.setAttribute(
+          "position",
+          new THREE.BufferAttribute(new Float32Array(positions), 3),
+        );
+        triGeom.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
+
+        const mat4 = new THREE.Matrix4();
+        if (transform) {
+          if (Array.isArray(transform) && transform.length >= 16) {
+            mat4.fromArray(transform);
+          } else if (transform.elements && transform.elements.length >= 16) {
+            mat4.fromArray(transform.elements);
+          }
+        }
+        triGeom.applyMatrix4(mat4);
+        if (this.currentModel) {
+          triGeom.applyMatrix4(this.currentModel.object.matrixWorld);
+        }
+
+        const edgesGeom = new THREE.EdgesGeometry(triGeom, 15);
+        triGeom.dispose();
+
+        const solidLines = new THREE.LineSegments(edgesGeom, solidMat.clone());
+        solidLines.renderOrder = 1;
+        this.selectionBackEdgesGroup.add(solidLines);
+
+        const posAttr = edgesGeom.attributes.position;
+        if (posAttr && posAttr.count > 0) {
+          const distances = new Float32Array(posAttr.count);
+          const vA = new THREE.Vector3();
+          const vB = new THREE.Vector3();
+          for (let i = 0; i < posAttr.count; i += 2) {
+            vA.fromBufferAttribute(posAttr, i);
+            vB.fromBufferAttribute(posAttr, i + 1);
+            distances[i] = 0;
+            distances[i + 1] = vA.distanceTo(vB);
+          }
+          edgesGeom.setAttribute(
+            "lineDistance",
+            new THREE.BufferAttribute(distances, 1),
+          );
+        }
+
+        const dashedLines = new THREE.LineSegments(edgesGeom, dashedMat.clone());
+        dashedLines.renderOrder = 2;
+        this.selectionBackEdgesGroup.add(dashedLines);
+      }
+    }
+
+    this.selectionBackEdgesGroup.visible = true;
+    this.world?.renderer?.update();
+  }
+
+  /** Remove all dashed back-edge lines for the current selection. */
+  clearSelectionBackEdges(): void {
+    const group = this.selectionBackEdgesGroup;
+    for (const child of [...group.children]) {
+      const ls = child as THREE.LineSegments;
+      ls.geometry?.dispose();
+      if (Array.isArray(ls.material)) {
+        ls.material.forEach((m) => m.dispose());
+      } else {
+        (ls.material as THREE.Material)?.dispose();
+      }
+      group.remove(child);
+    }
+    this.selectionBackEdgesGroup.visible = false;
+    this.world?.renderer?.update();
+  }
+
+  /** Toggle dashed back-edges for the model and selection. */
+  async setBackEdges(enabled: boolean): Promise<void> {
+    this.backEdgesEnabled = enabled;
+    this.onBackEdgesChanged.emit(enabled);
+    if (enabled) {
+      this.modelBackEdgesGroup.visible = true;
+      if (this.lastSelection) {
+        void this.updateSelectionBackEdges(this.lastSelection.expressId);
+      }
+      await this.buildModelBackEdges();
+    } else {
+      this.modelBackEdgesGroup.visible = this.hiddenLines;
+      this.selectionBackEdgesGroup.visible = false;
+      this.world?.renderer?.update();
+    }
+  }
+
+  backEdgesOn(): boolean {
+    return this.backEdgesEnabled;
+  }
+
+
+  // ---------------------------------------------------------------------------
+  // X-Ray mode (full-model semi-transparency)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Toggle X-Ray mode: makes all model geometry semi-transparent (~40% opacity)
+   * so interior elements (columns, framing, pipes) are visible through walls.
+   * Uses FragmentsModel.setOpacity/resetOpacity — GPU-only, 60fps, zero extra geometry.
+   */
+  async setXray(on: boolean): Promise<void> {
+    this.xrayMode = on;
+    const model = this.currentModel;
+    if (model) {
+      if (on) {
+        await model.setOpacity(undefined, 0.4);
+      } else {
+        await model.resetOpacity(undefined);
+      }
+      await this.fragmentsManager.core.update(true);
+      this.world?.renderer?.update();
+    }
+    this.onXrayChanged.emit(on);
+  }
+
+  xrayOn(): boolean {
+    return this.xrayMode;
   }
 
   /** Whether the live ruler cursor is currently snapped to a vertex. */
@@ -753,8 +1300,11 @@ export class Viewer {
 
   getModelHeightRange(): { min: number; max: number } | null {
     if (!this.currentModel) return null;
-    const box = this.currentModel.box;
-    if (!Number.isFinite(box.min.y) || !Number.isFinite(box.max.y)) return null;
+    let box = this.currentModel.box;
+    if (!box || !Number.isFinite(box.min.y) || !Number.isFinite(box.max.y) || box.isEmpty()) {
+      box = new THREE.Box3().setFromObject(this.currentModel.object);
+    }
+    if (!Number.isFinite(box.min.y) || !Number.isFinite(box.max.y) || box.isEmpty()) return null;
     return { min: box.min.y, max: box.max.y };
   }
 
@@ -765,23 +1315,48 @@ export class Viewer {
     if (this.lastSelection) {
       box = await model.getMergedBox([this.lastSelection.expressId]);
     }
-    const size = box.getSize(new THREE.Vector3()).length();
+    const testVec = new THREE.Vector3();
+    const size = box.getSize(testVec);
+    const len = size.length();
     const center = box.getCenter(new THREE.Vector3());
-    if (!Number.isFinite(size) || size <= 0) return;
-    this.world.camera.controls.setLookAt(
-      center.x + size,
-      center.y + size,
-      center.z + size,
+    if (!Number.isFinite(len) || len <= 0 || box.isEmpty()) return;
+
+    const maxDim = Math.max(size.x, size.y, size.z, 0.1);
+    const camera = this.world.camera.three;
+    const requiredFar = Math.max(10000, maxDim * 50, center.length() + maxDim * 10);
+    const requiredNear = Math.min(0.1, Math.max(0.001, maxDim / 5000));
+    if (camera.far < requiredFar) camera.far = requiredFar;
+    if (camera.near > requiredNear) camera.near = requiredNear;
+    camera.updateProjectionMatrix();
+
+    const controls = this.world.camera.controls;
+    controls.maxDistance = Math.max(controls.maxDistance, camera.far * 0.8);
+    controls.minDistance = Math.min(controls.minDistance, camera.near * 2);
+
+    const fovRad = THREE.MathUtils.degToRad(
+      camera instanceof THREE.PerspectiveCamera ? camera.fov : 60,
+    );
+    const dist = (maxDim / 2) / Math.tan(fovRad / 2) * 1.5;
+    const offset = dist / Math.sqrt(3);
+
+    await controls.setLookAt(
+      center.x + offset,
+      center.y + offset,
+      center.z + offset,
       center.x,
       center.y,
       center.z,
       true,
     );
+    controls.update(0.016);
+    model.useCamera(camera);
+    await this.fragmentsManager.core.update(true);
+    this.world.renderer?.update();
   }
 
   resetCamera(): void {
     if (this.currentModel) {
-      this.fitToModel(this.currentModel);
+      void this.zoomToFit(true);
     } else {
       this.world.camera.controls.setLookAt(20, 20, 20, 0, 0, 0, true);
     }

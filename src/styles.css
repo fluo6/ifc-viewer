@@ -9,7 +9,7 @@ body {
 
 #app {
   display: grid;
-  grid-template-rows: 40px 1fr;
+  grid-template-rows: 40px 1fr 38px;
 }
 
 #toolbar {
@@ -88,41 +88,80 @@ body {
   border: 2px dashed transparent;
   transition: background 120ms, border-color 120ms;
 }
-#dropzone.empty { pointer-events: auto; }
+#dropzone.empty {
+  pointer-events: auto;
+  cursor: pointer;
+}
+#dropzone.empty:hover {
+  color: #c9d1d9;
+}
 #dropzone.dragover {
   background: rgba(255,165,0,0.06);
   border-color: rgba(255,165,0,0.5);
 }
 
+#footer {
+  background: #161b22;
+  border-top: 1px solid #30363d;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 12px;
+  font-size: 12px;
+  user-select: none;
+  z-index: 10;
+}
+
+#edges,
+#grid-controls,
+#ruler,
 #clipper {
-  position: absolute; bottom: 12px; left: 12px;
-  background: rgba(22,27,34,0.92);
-  border: 1px solid #30363d;
-  border-radius: 4px;
-  padding: 6px 8px;
-  font-size: 12px;
-  display: flex; align-items: center; gap: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-/* Stacked above #ruler rather than beside #clipper, which grows a slider. */
-#edges {
-  position: absolute; bottom: 92px; left: 12px;
-  background: rgba(22,27,34,0.92);
-  border: 1px solid #30363d;
-  border-radius: 4px;
-  padding: 6px 8px;
-  font-size: 12px;
-  display: flex; align-items: center; gap: 8px;
+#grid-controls:not([style*="display: none"])::before,
+#ruler:not([style*="display: none"])::before,
+#clipper:not([style*="display: none"])::before {
+  content: "";
+  display: inline-block;
+  height: 16px;
+  width: 1px;
+  background: #30363d;
+  margin-right: 4px;
 }
 
-#ruler {
-  position: absolute; bottom: 52px; left: 12px;
-  background: rgba(22,27,34,0.92);
+#version-info {
+  margin-left: auto;
+  color: #6e7681;
+  font-size: 11px;
+  white-space: nowrap;
+  letter-spacing: 0.2px;
+}
+
+#footer button.mini {
+  background: #21262d;
+  color: #c9d1d9;
   border: 1px solid #30363d;
   border-radius: 4px;
-  padding: 6px 8px;
+  padding: 3px 8px;
   font-size: 12px;
-  display: flex; align-items: center; gap: 8px;
+  cursor: pointer;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+#footer button.mini:hover {
+  background: #30363d;
+}
+
+#clipper input[type="range"] {
+  accent-color: #f0883e;
+}
+
+[data-thatopen-logo] {
+  z-index: 5;
+  pointer-events: auto;
 }
 
 #toast-host {

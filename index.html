@@ -5,12 +5,37 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>IFC Viewer</title>
     <link rel="stylesheet" href="/src/styles.css" />
+    <script>
+      if (typeof window !== "undefined") {
+        if (!window.GPUShaderStage) {
+          window.GPUShaderStage = { VERTEX: 1, FRAGMENT: 2, COMPUTE: 4 };
+        }
+        if (!window.crypto) {
+          window.crypto = {};
+        }
+        if (!window.crypto.randomUUID) {
+          window.crypto.randomUUID = function () {
+            return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, function (c) {
+              var n = Number(c);
+              return (
+                n ^
+                ((window.crypto.getRandomValues
+                  ? window.crypto.getRandomValues(new Uint8Array(1))[0]
+                  : Math.floor(Math.random() * 256)) &
+                  (15 >> (n / 4)))
+              ).toString(16);
+            });
+          };
+        }
+      }
+    </script>
   </head>
   <body>
     <div id="app">
       <div id="toolbar">
         <button id="open-btn">Open IFC&hellip;</button>
         <input id="model-file-input" type="file" accept=".ifc" hidden />
+        <button id="fit-btn" title="Zoom Extents (Z)" disabled>Zoom Extents</button>
         <button id="export-btn" disabled>Export XLSX</button>
         <span id="model-name" class="muted">no model loaded</span>
         <span id="model-count"></span>
@@ -20,12 +45,16 @@
         <div id="categories"></div>
         <div id="viewport">
           <div id="dropzone"></div>
-          <div id="clipper"></div>
-          <div id="edges"></div>
-          <div id="ruler"></div>
         </div>
         <div id="properties"></div>
       </div>
+      <footer id="footer">
+        <div id="edges"></div>
+        <div id="grid-controls"></div>
+        <div id="ruler"></div>
+        <div id="clipper"></div>
+        <div id="version-info"></div>
+      </footer>
       <div id="toast-host"></div>
     </div>
     <script type="module" src="/src/main.ts"></script>

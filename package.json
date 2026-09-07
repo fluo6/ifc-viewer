@@ -26,7 +26,9 @@
       ]
     },
     "linux": {
-      "target": ["dir"]
+      "target": [
+        "dir"
+      ]
     },
     "directories": {
       "output": "release"
@@ -59,7 +61,7 @@
     "@thatopen/components-front": "3.4.4",
     "@thatopen/fragments": "3.4.7",
     "exceljs": "^4.4.0",
-    "three": "^0.182.0",
+    "three": "0.184.0",
     "web-ifc": "0.0.77"
   }
 }

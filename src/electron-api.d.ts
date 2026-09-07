@@ -24,8 +24,12 @@ declare global {
       onIfcPreprocessProgress: (
         handler: (event: PreprocessProgress) => void,
       ) => () => void;
+      getPathForFile?: (file: File) => string;
     };
   }
 }
+
+declare const __APP_VERSION__: string;
+declare const __BUILD_TIME__: string;
 
 export {};

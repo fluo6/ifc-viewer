@@ -5,9 +5,11 @@ import { mountProperties } from "./ui/properties";
 import { mountCategories } from "./ui/categories";
 import { mountClipper } from "./ui/clipper";
 import { mountEdges } from "./ui/edges";
+import { mountGrid } from "./ui/grid";
 import { mountRuler } from "./ui/ruler";
 import { mountKeybindings } from "./ui/keybindings";
 import { mountExport } from "./ui/export";
+import { mountVersion } from "./ui/version";
 
 const viewport = document.getElementById("viewport")!;
 const viewer = new Viewer();
@@ -32,10 +34,13 @@ void (async () => {
   mountCategories(viewer);
   mountClipper(viewer);
   mountEdges(viewer);
+  mountGrid(viewer);
   mountRuler(viewer);
+  mountVersion();
   mountKeybindings(viewer);
   console.log("viewer ready");
 })();
+
 
 function escape(s: string): string {
   return s.replace(

@@ -9,7 +9,24 @@ export function mountDropzone(viewer: Viewer): void {
   placeholder.textContent =
     "Drop an .ifc file here, or click Open to choose one.";
 
-  viewer.onModelLoaded.on(() => placeholder.classList.remove("empty"));
+  // Clicking anywhere in the empty dropzone triggers the file picker
+  placeholder.addEventListener("click", () => {
+    if (placeholder.classList.contains("empty")) {
+      const openBtn = document.getElementById("open-btn") as HTMLButtonElement | null;
+      openBtn?.click();
+    }
+  });
+
+  viewer.onLoadStarted.on(({ filename }) => {
+    if (placeholder.classList.contains("empty")) {
+      placeholder.textContent = `Loading ${filename}… please wait`;
+    }
+  });
+
+  viewer.onModelLoaded.on(() => {
+    placeholder.classList.remove("empty");
+    placeholder.textContent = "";
+  });
   viewer.onModelUnloaded.on(() => {
     placeholder.classList.add("empty");
     placeholder.textContent =
@@ -21,6 +38,13 @@ export function mountDropzone(viewer: Viewer): void {
     e.stopPropagation();
   };
 
+  window.addEventListener("dragenter", (e) => e.preventDefault());
+  window.addEventListener("dragover", (e) => e.preventDefault());
+  window.addEventListener("dragleave", (e) => {
+    if (!e.relatedTarget) placeholder.classList.remove("dragover");
+  });
+  window.addEventListener("drop", (e) => e.preventDefault());
+
   root.addEventListener("dragenter", (e) => {
     stop(e);
     placeholder.classList.add("dragover");
@@ -31,7 +55,9 @@ export function mountDropzone(viewer: Viewer): void {
   });
   root.addEventListener("dragleave", (e) => {
     stop(e);
-    if (e.target === root) placeholder.classList.remove("dragover");
+    if (e.target === root || !e.relatedTarget) {
+      placeholder.classList.remove("dragover");
+    }
   });
   root.addEventListener("drop", async (e) => {
     stop(e);
@@ -42,25 +68,59 @@ export function mountDropzone(viewer: Viewer): void {
       toast("Only .ifc files are supported");
       return;
     }
-    const electronPath = (file as any).path as string | undefined;
+    let electronPath: string | undefined;
+    if (typeof window.electron !== "undefined") {
+      try {
+        electronPath =
+          window.electron.getPathForFile?.(file) ??
+          ((file as any).path as string | undefined);
+      } catch {
+        electronPath = (file as any).path as string | undefined;
+      }
+    }
     if (electronPath && typeof window.electron !== "undefined") {
       try {
+        console.log(`[IFC] Dropped electron file "${electronPath}"...`);
         await viewer.loadIfcPath(electronPath);
       } catch (err) {
-        toast((err as Error).message);
+        console.error("[IFC] Failed to load dropped electron path:", err);
+        const msg = (err as Error).message || String(err);
+        toast(msg, "error", 8000);
       }
       return;
     }
-    if (file.size > LARGE_IFC_THRESHOLD_BYTES) {
+    if (
+      file.size > LARGE_IFC_THRESHOLD_BYTES &&
+      typeof window.electron !== "undefined"
+    ) {
       toast(
         "Files over 50 MiB must be opened using the Open button to enable preprocessing.",
       );
       return;
     }
     try {
+      console.log(
+        `[IFC] Dropped file "${file.name}" (${(file.size / (1024 * 1024)).toFixed(2)} MB)...`,
+      );
       await viewer.loadIfc(file);
     } catch (err) {
-      toast((err as Error).message);
+      console.error("[IFC] Failed to load dropped file:", err);
+      const msg = (err as Error).message || String(err);
+      toast(msg, "error", 8000);
+      const nameEl = document.getElementById("model-name");
+      const countEl = document.getElementById("model-count");
+      const progress = document.getElementById("progress");
+      if (nameEl) {
+        nameEl.textContent = "Failed to load model";
+        nameEl.classList.add("muted");
+      }
+      if (countEl) countEl.textContent = `(${msg})`;
+      if (progress) progress.classList.add("hidden");
+      placeholder.classList.add("empty");
+      placeholder.textContent =
+        "Drop an .ifc file here, or click Open to choose one.";
+    } finally {
+      document.body.style.cursor = "";
     }
   });
 }

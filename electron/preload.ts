@@ -1,8 +1,9 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { WorkbookModel } from "./xlsx-writer";
 import type { PreparedIfc, PreprocessProgress } from "./ifc-preprocessor";
 
 contextBridge.exposeInMainWorld("electron", {
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
   openFileDialog: (): Promise<string | null> =>
     ipcRenderer.invoke("dialog:open-ifc"),
   readFile: (filePath: string): Promise<ArrayBuffer> =>
