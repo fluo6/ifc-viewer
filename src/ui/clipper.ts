@@ -21,7 +21,10 @@ export function mountClipper(viewer: Viewer): void {
     viewer.clearClipping();
   });
 
+  let isSliderInteraction = false;
+
   viewer.onClippingChanged.on(() => {
+    if (isSliderInteraction) return;
     render();
     if (boxPanelOpen) {
       renderBoxPanel();
@@ -180,7 +183,9 @@ export function mountClipper(viewer: Viewer): void {
     slider.addEventListener("input", () => {
       const v = parseFloat(slider.value);
       valSpan.textContent = `${state.axis.toUpperCase()}: ${v.toFixed(2)}m`;
+      isSliderInteraction = true;
       viewer.setClippingState({ planePos: v });
+      isSliderInteraction = false;
     });
 
     root.appendChild(slider);
@@ -232,7 +237,9 @@ export function mountClipper(viewer: Viewer): void {
     minSlider.addEventListener("input", () => {
       const v = parseFloat(minSlider.value);
       minVal.textContent = `${v.toFixed(2)}m`;
+      isSliderInteraction = true;
       viewer.setClippingState({ sliceMin: v });
+      isSliderInteraction = false;
     });
 
     root.appendChild(minSlider);
@@ -260,7 +267,9 @@ export function mountClipper(viewer: Viewer): void {
     maxSlider.addEventListener("input", () => {
       const v = parseFloat(maxSlider.value);
       maxVal.textContent = `${v.toFixed(2)}m`;
+      isSliderInteraction = true;
       viewer.setClippingState({ sliceMax: v });
+      isSliderInteraction = false;
     });
 
     root.appendChild(maxSlider);
@@ -419,7 +428,9 @@ export function mountClipper(viewer: Viewer): void {
         const val = parseFloat(minSlider.value);
         minVal.textContent = `${val.toFixed(2)}m`;
         const updatedMin = { ...viewer.getClippingState().boxMin, [cfg.minKey]: val };
+        isSliderInteraction = true;
         viewer.setClippingState({ boxMin: updatedMin });
+        isSliderInteraction = false;
       });
 
       row.appendChild(minSlider);
@@ -446,7 +457,9 @@ export function mountClipper(viewer: Viewer): void {
         const val = parseFloat(maxSlider.value);
         maxVal.textContent = `${val.toFixed(2)}m`;
         const updatedMax = { ...viewer.getClippingState().boxMax, [cfg.minKey]: val };
+        isSliderInteraction = true;
         viewer.setClippingState({ boxMax: updatedMax });
+        isSliderInteraction = false;
       });
 
       row.appendChild(maxSlider);
