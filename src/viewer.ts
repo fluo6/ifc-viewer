@@ -3,6 +3,7 @@ import * as OBF from "@thatopen/components-front";
 import * as FRAGS from "@thatopen/fragments";
 import fragmentsWorkerUrl from "@thatopen/fragments/worker?url";
 import * as THREE from "three";
+import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { Emitter } from "./events";
 import { IfcParameterReader, type ElementParameters } from "./ifc-parameters";
 import type { IfcSet } from "./ifc-sets";
@@ -170,6 +171,9 @@ export class Viewer {
   private lastSelection: Selection | null = null;
   private activePlanes: THREE.Plane[] = [];
   private clippingHelpersGroup = new THREE.Group();
+  private clippingGizmosGroup = new THREE.Group();
+  private gizmos: { proxy: THREE.Mesh; control: TransformControls }[] = [];
+  private isDraggingGizmo = false;
   private clipState: ClippingState = {
     enabled: false,
     mode: "plane",
@@ -269,6 +273,9 @@ export class Viewer {
     this.clippingHelpersGroup.name = "clipping-helpers";
     world.scene.three.add(this.clippingHelpersGroup);
 
+    this.clippingGizmosGroup.name = "clipping-gizmos";
+    world.scene.three.add(this.clippingGizmosGroup);
+
     // The ground grid uses a shader plane. During the edge-detection pass, Sobel filtering
     // on the grid's lines produces severe artifacts (thick double-lines, moiré at the horizon,
     // and cutting through solid meshes). Temporarily hiding the grid during the edge pass
@@ -284,15 +291,18 @@ export class Viewer {
       const wasVisible = this.grid.three.visible;
       const wasDashedVisible = this.dashedEdgesGroup.visible;
       const wasHelpersVisible = this.clippingHelpersGroup.visible;
+      const wasGizmosVisible = this.clippingGizmosGroup.visible;
       this.grid.three.visible = false;
       this.dashedEdgesGroup.visible = false;
       this.clippingHelpersGroup.visible = false;
+      this.clippingGizmosGroup.visible = false;
       try {
         originalEdgesRender(rendererInstance, writeBuffer, readBuffer);
       } finally {
         this.grid.three.visible = wasVisible;
         this.dashedEdgesGroup.visible = wasDashedVisible;
         this.clippingHelpersGroup.visible = wasHelpersVisible;
+        this.clippingGizmosGroup.visible = wasGizmosVisible;
       }
     };
 
@@ -1489,6 +1499,84 @@ export class Viewer {
     }
 
     this.world?.renderer?.update();
+    this.syncGizmos();
+  }
+
+  private syncGizmos(): void {
+    if (this.isDraggingGizmo) return;
+
+    for (const g of this.gizmos) {
+      g.control.detach();
+      g.control.dispose();
+      this.clippingGizmosGroup.remove(g.proxy);
+      this.clippingGizmosGroup.remove(g.control as any);
+    }
+    this.gizmos = [];
+
+    if (!this.clipState.enabled || !this.clipState.showHelper || !this.currentModel) {
+      this.world?.renderer?.update();
+      return;
+    }
+
+    const { mode, axis, planePos, sliceMin, sliceMax, boxMin, boxMax } = this.clipState;
+    const box = this.getModelBoundingBox();
+    const center = box ? box.getCenter(new THREE.Vector3()) : new THREE.Vector3();
+
+    const createGizmo = (
+      gizmoAxis: ClipAxis,
+      initialPos: number,
+      onDrag: (val: number) => void
+    ) => {
+      const proxy = new THREE.Mesh(
+        new THREE.BoxGeometry(0.1, 0.1, 0.1),
+        new THREE.MeshBasicMaterial({ visible: false })
+      );
+      proxy.position.copy(center);
+      proxy.position[gizmoAxis] = initialPos;
+      this.clippingGizmosGroup.add(proxy);
+
+      const control = new TransformControls(
+        this.world.camera.three,
+        this.world.renderer!.three.domElement
+      );
+      control.attach(proxy);
+      control.showX = gizmoAxis === "x";
+      control.showY = gizmoAxis === "y";
+      control.showZ = gizmoAxis === "z";
+      control.showXY = false;
+      control.showXZ = false;
+      control.showYZ = false;
+      control.size = 1.25;
+      control.setMode("translate");
+
+      control.addEventListener("dragging-changed", (event: any) => {
+        this.isDraggingGizmo = event.value;
+        this.world.camera.controls.enabled = !event.value;
+      });
+
+      control.addEventListener("change", () => {
+        if (this.isDraggingGizmo) {
+          onDrag(proxy.position[gizmoAxis]);
+        }
+      });
+
+      this.clippingGizmosGroup.add(control as any);
+      this.gizmos.push({ proxy, control });
+    };
+
+    if (mode === "plane") {
+      createGizmo(axis, planePos, (val) => this.setClippingState({ planePos: val }));
+    } else if (mode === "slice") {
+      createGizmo(axis, sliceMin, (val) => this.setClippingState({ sliceMin: val }));
+      createGizmo(axis, sliceMax, (val) => this.setClippingState({ sliceMax: val }));
+    } else if (mode === "box") {
+      createGizmo("x", boxMin.x, (val) => this.setClippingState({ boxMin: { ...this.clipState.boxMin, x: val } }));
+      createGizmo("x", boxMax.x, (val) => this.setClippingState({ boxMax: { ...this.clipState.boxMax, x: val } }));
+      createGizmo("y", boxMin.y, (val) => this.setClippingState({ boxMin: { ...this.clipState.boxMin, y: val } }));
+      createGizmo("y", boxMax.y, (val) => this.setClippingState({ boxMax: { ...this.clipState.boxMax, y: val } }));
+      createGizmo("z", boxMin.z, (val) => this.setClippingState({ boxMin: { ...this.clipState.boxMin, z: val } }));
+      createGizmo("z", boxMax.z, (val) => this.setClippingState({ boxMax: { ...this.clipState.boxMax, z: val } }));
+    }
   }
 
   /**
