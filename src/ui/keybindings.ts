@@ -32,6 +32,10 @@ export function mountKeybindings(viewer: Viewer): void {
     } else if (e.key === "x" || e.key === "X") {
       e.preventDefault();
       void viewer.setXray(!viewer.xrayOn());
+    } else if (e.key === "c" || e.key === "C") {
+      e.preventDefault();
+      const state = viewer.getClippingState();
+      viewer.setClippingState({ enabled: !state.enabled });
     }
   });
 }

@@ -174,3 +174,219 @@ test("unloading the model clears the clipping plane", async () => {
     await app.close();
   }
 });
+
+test("orthogonal axes X and Z clip geometry along their respective directions", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const viewport = page.locator("#viewport");
+    const baseline = await viewport.screenshot();
+
+    // Cut along X axis
+    await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      const range = viewer.getModelAxisRange("x");
+      viewer.setClippingState({
+        enabled: true,
+        mode: "plane",
+        axis: "x",
+        planePos: (range.min + range.max) / 2,
+      });
+    });
+    await page.waitForTimeout(500);
+    const cutX = await viewport.screenshot();
+    expect(cutX.equals(baseline), "clipping along X should visibly change render").toBe(false);
+    expect(await page.evaluate(() => (window as any).__viewer.debugClippingPlaneCount())).toBe(1);
+
+    // Cut along Z axis
+    await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      const range = viewer.getModelAxisRange("z");
+      viewer.setClippingState({
+        enabled: true,
+        mode: "plane",
+        axis: "z",
+        planePos: (range.min + range.max) / 2,
+      });
+    });
+    await page.waitForTimeout(500);
+    const cutZ = await viewport.screenshot();
+    expect(cutZ.equals(baseline), "clipping along Z should visibly change render").toBe(false);
+    expect(cutZ.equals(cutX), "X cut and Z cut should produce different renders").toBe(false);
+    expect(await page.evaluate(() => (window as any).__viewer.debugClippingPlaneCount())).toBe(1);
+  } finally {
+    await app.close();
+  }
+});
+
+test("inverting the cut direction flips which side of the plane is clipped", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const viewport = page.locator("#viewport");
+
+    await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      const range = viewer.getModelAxisRange("y");
+      viewer.setClippingState({
+        enabled: true,
+        mode: "plane",
+        axis: "y",
+        inverted: false,
+        planePos: (range.min + range.max) / 2,
+      });
+    });
+    await page.waitForTimeout(500);
+    const normalCut = await viewport.screenshot();
+
+    // Flip cut direction
+    await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      viewer.setClippingState({ inverted: true });
+    });
+    await page.waitForTimeout(500);
+    const invertedCut = await viewport.screenshot();
+
+    expect(
+      normalCut.equals(invertedCut),
+      "normal cut and inverted cut should show opposite halves of the model",
+    ).toBe(false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("slice mode creates two clipping planes", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const viewport = page.locator("#viewport");
+    const baseline = await viewport.screenshot();
+
+    await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      const range = viewer.getModelAxisRange("y");
+      const span = range.max - range.min;
+      viewer.setClippingState({
+        enabled: true,
+        mode: "slice",
+        axis: "y",
+        sliceMin: range.min + span * 0.3,
+        sliceMax: range.min + span * 0.7,
+      });
+    });
+    await page.waitForTimeout(500);
+    const sliced = await viewport.screenshot();
+
+    expect(sliced.equals(baseline), "slice mode should visibly isolate a slab").toBe(false);
+    expect(await page.evaluate(() => (window as any).__viewer.debugClippingPlaneCount())).toBe(2);
+  } finally {
+    await app.close();
+  }
+});
+
+test("section box mode creates 6 clipping planes and fitToSelection shrinks the box", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+
+    await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      const box = viewer.getModelBoundingBox();
+      viewer.setClippingState({
+        enabled: true,
+        mode: "box",
+        boxMin: { x: box.min.x, y: box.min.y, z: box.min.z },
+        boxMax: { x: box.max.x, y: box.max.y, z: box.max.z },
+      });
+    });
+    expect(await page.evaluate(() => (window as any).__viewer.debugClippingPlaneCount())).toBe(6);
+
+    // Select first beam and fit section box
+    const fitted = await page.evaluate(async () => {
+      const viewer = (window as any).__viewer;
+      const categories = viewer.getCategories();
+      const firstBeamId = categories.get("IFCBEAM")?.[0];
+      if (firstBeamId == null) return false;
+      await viewer.select(firstBeamId);
+      return viewer.fitSectionBoxToSelection(0.2);
+    });
+    expect(fitted).toBe(true);
+
+    const state = await page.evaluate(() => (window as any).__viewer.getClippingState());
+    expect(state.mode).toBe("box");
+    expect(state.enabled).toBe(true);
+
+    // Reset box
+    await page.evaluate(() => (window as any).__viewer.resetSectionBox());
+    const resetState = await page.evaluate(() => (window as any).__viewer.getClippingState());
+    const modelBounds = await page.evaluate(() => {
+      const b = (window as any).__viewer.getModelBoundingBox();
+      return { min: b.min, max: b.max };
+    });
+    expect(resetState.boxMin.x).toBeCloseTo(modelBounds.min.x, 3);
+    expect(resetState.boxMax.x).toBeCloseTo(modelBounds.max.x, 3);
+  } finally {
+    await app.close();
+  }
+});
+
+test("keyboard shortcut 'c' toggles clipping", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    expect(await page.evaluate(() => (window as any).__viewer.getClippingState().enabled)).toBe(false);
+
+    await page.keyboard.press("c");
+    expect(await page.evaluate(() => (window as any).__viewer.getClippingState().enabled)).toBe(true);
+
+    await page.keyboard.press("c");
+    expect(await page.evaluate(() => (window as any).__viewer.getClippingState().enabled)).toBe(false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("clipper UI renders buttons and interacts with modes", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const toggle = page.locator("#clipper-toggle");
+    await expect(toggle).toHaveText("Clip: OFF");
+
+    await toggle.click();
+    await expect(toggle).toHaveText("Clip: ON");
+
+    // Mode buttons should be present
+    const planeBtn = page.locator("#clipper button:has-text('Plane')");
+    const sliceBtn = page.locator("#clipper button:has-text('Slice')");
+    const boxBtn = page.locator("#clipper button:has-text('Box')");
+    await expect(planeBtn).toBeVisible();
+    await expect(sliceBtn).toBeVisible();
+    await expect(boxBtn).toBeVisible();
+
+    // In Plane mode: Axis buttons X, Y, Z and Flip are visible
+    await expect(page.locator("#clipper button:has-text('Y')")).toBeVisible();
+    await expect(page.locator("#clipper button:has-text('Flip')")).toBeVisible();
+
+    // Switch to Slice mode
+    await sliceBtn.click();
+    expect(await page.evaluate(() => (window as any).__viewer.getClippingState().mode)).toBe("slice");
+    await expect(page.locator(".clip-slider-min")).toBeVisible();
+    await expect(page.locator(".clip-slider-max")).toBeVisible();
+
+    // Switch to Box mode
+    await boxBtn.click();
+    expect(await page.evaluate(() => (window as any).__viewer.getClippingState().mode)).toBe("box");
+    await expect(page.locator("#section-box-panel")).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+

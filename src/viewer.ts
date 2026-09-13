@@ -41,6 +41,22 @@ export interface Point3 {
   z: number;
 }
 
+export type ClipAxis = "x" | "y" | "z";
+export type ClipMode = "plane" | "slice" | "box";
+
+export interface ClippingState {
+  enabled: boolean;
+  mode: ClipMode;
+  axis: ClipAxis;
+  inverted: boolean;
+  planePos: number;
+  sliceMin: number;
+  sliceMax: number;
+  boxMin: Point3;
+  boxMax: Point3;
+  showHelper: boolean;
+}
+
 // 50 mm. The library default of 0.25 (250 mm) grabs the wrong vertex constantly
 // at building scale.
 const SNAP_DISTANCE_METRES = 0.05;
@@ -152,7 +168,21 @@ export class Viewer {
   private currentFilename = "";
   private currentIsStreamed = false;
   private lastSelection: Selection | null = null;
-  private clipPlane: THREE.Plane | null = null;
+  private activePlanes: THREE.Plane[] = [];
+  private clippingHelpersGroup = new THREE.Group();
+  private clipState: ClippingState = {
+    enabled: false,
+    mode: "plane",
+    axis: "y",
+    inverted: false,
+    planePos: 0,
+    sliceMin: 0,
+    sliceMax: 1,
+    boxMin: { x: 0, y: 0, z: 0 },
+    boxMax: { x: 1, y: 1, z: 1 },
+    showHelper: false,
+  };
+  readonly onClippingChanged = new Emitter<ClippingState>();
 
   /**
    * Raw-IFC reader kept open alongside the fragments. OBC's IfcLoader strips
@@ -236,6 +266,9 @@ export class Viewer {
     this.dashedEdgesGroup.add(this.selectionBackEdgesGroup);
     world.scene.three.add(this.dashedEdgesGroup);
 
+    this.clippingHelpersGroup.name = "clipping-helpers";
+    world.scene.three.add(this.clippingHelpersGroup);
+
     // The ground grid uses a shader plane. During the edge-detection pass, Sobel filtering
     // on the grid's lines produces severe artifacts (thick double-lines, moiré at the horizon,
     // and cutting through solid meshes). Temporarily hiding the grid during the edge pass
@@ -250,13 +283,16 @@ export class Viewer {
     ) => {
       const wasVisible = this.grid.three.visible;
       const wasDashedVisible = this.dashedEdgesGroup.visible;
+      const wasHelpersVisible = this.clippingHelpersGroup.visible;
       this.grid.three.visible = false;
       this.dashedEdgesGroup.visible = false;
+      this.clippingHelpersGroup.visible = false;
       try {
         originalEdgesRender(rendererInstance, writeBuffer, readBuffer);
       } finally {
         this.grid.three.visible = wasVisible;
         this.dashedEdgesGroup.visible = wasDashedVisible;
+        this.clippingHelpersGroup.visible = wasHelpersVisible;
       }
     };
 
@@ -528,6 +564,8 @@ export class Viewer {
 
     let elementCount = 0;
     for (const ids of categories.values()) elementCount += ids.length;
+
+    this.initClippingStateForModel();
 
     this.onModelLoaded.emit({
       filename: name,
@@ -1283,6 +1321,177 @@ export class Viewer {
   }
 
   /**
+   * Initializes default clipping plane state based on the current model bounds.
+   */
+  private initClippingStateForModel(): void {
+    const box = this.getModelBoundingBox();
+    if (!box) return;
+    const centerY = (box.min.y + box.max.y) / 2;
+    const spanY = box.max.y - box.min.y;
+    this.clipState = {
+      enabled: false,
+      mode: "plane",
+      axis: "y",
+      inverted: false,
+      planePos: centerY,
+      sliceMin: box.min.y + spanY * 0.25,
+      sliceMax: box.min.y + spanY * 0.75,
+      boxMin: { x: box.min.x, y: box.min.y, z: box.min.z },
+      boxMax: { x: box.max.x, y: box.max.y, z: box.max.z },
+      showHelper: false,
+    };
+  }
+
+  /**
+   * Returns current clipping configuration.
+   */
+  getClippingState(): Readonly<ClippingState> {
+    return { ...this.clipState };
+  }
+
+  /**
+   * Updates clipping configuration and applies the resulting planes to the renderer.
+   */
+  setClippingState(updates: Partial<ClippingState>): void {
+    const prevAxis = this.clipState.axis;
+    this.clipState = { ...this.clipState, ...updates };
+
+    // When switching axis without specifying a plane position, reset to that axis's center and slice defaults
+    if (updates.axis && updates.axis !== prevAxis && updates.planePos === undefined) {
+      const range = this.getModelAxisRange(this.clipState.axis);
+      if (range) {
+        this.clipState.planePos = (range.min + range.max) / 2;
+        const span = range.max - range.min;
+        this.clipState.sliceMin = range.min + span * 0.25;
+        this.clipState.sliceMax = range.min + span * 0.75;
+      }
+    }
+
+    this.syncClippingPlanes();
+    this.onClippingChanged.emit(this.clipState);
+  }
+
+  /**
+   * Cleans up 3D wireframe helpers.
+   */
+  private clearClippingHelpers(): void {
+    while (this.clippingHelpersGroup.children.length > 0) {
+      const child = this.clippingHelpersGroup.children[0] as any;
+      this.clippingHelpersGroup.remove(child);
+      child.dispose?.();
+      child.geometry?.dispose?.();
+      if (Array.isArray(child.material)) {
+        child.material.forEach((m: any) => m?.dispose?.());
+      } else {
+        child.material?.dispose?.();
+      }
+    }
+  }
+
+  /**
+   * Synchronizes active THREE.Plane instances with the renderer.
+   */
+  private syncClippingPlanes(): void {
+    const renderer = this.world?.renderer;
+    if (!renderer) return;
+
+    this.clearClippingHelpers();
+
+    if (!this.clipState.enabled || !this.currentModel) {
+      for (const p of this.activePlanes) {
+        renderer.setPlane(false, p);
+      }
+      this.activePlanes = [];
+      this.world?.renderer?.update();
+      return;
+    }
+
+    const desiredPlanes: THREE.Plane[] = [];
+    const { mode, axis, inverted, planePos, sliceMin, sliceMax, boxMin, boxMax, showHelper } = this.clipState;
+
+    if (mode === "plane") {
+      const normal = new THREE.Vector3();
+      let constant = 0;
+      if (axis === "x") {
+        if (!inverted) { normal.set(-1, 0, 0); constant = planePos; }
+        else { normal.set(1, 0, 0); constant = -planePos; }
+      } else if (axis === "y") {
+        if (!inverted) { normal.set(0, -1, 0); constant = planePos; }
+        else { normal.set(0, 1, 0); constant = -planePos; }
+      } else { // z
+        if (!inverted) { normal.set(0, 0, -1); constant = planePos; }
+        else { normal.set(0, 0, 1); constant = -planePos; }
+      }
+      const plane = new THREE.Plane(normal, constant);
+      desiredPlanes.push(plane);
+
+      if (showHelper) {
+        const box = this.getModelBoundingBox();
+        const s = box ? Math.max(box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z) * 1.5 : 20;
+        this.clippingHelpersGroup.add(new THREE.PlaneHelper(plane, s, 0xf0883e));
+      }
+    } else if (mode === "slice") {
+      const nMin = new THREE.Vector3();
+      const nMax = new THREE.Vector3();
+      if (axis === "x") {
+        nMin.set(1, 0, 0);
+        nMax.set(-1, 0, 0);
+      } else if (axis === "y") {
+        nMin.set(0, 1, 0);
+        nMax.set(0, -1, 0);
+      } else {
+        nMin.set(0, 0, 1);
+        nMax.set(0, 0, -1);
+      }
+      const minP = Math.min(sliceMin, sliceMax);
+      const maxP = Math.max(sliceMin, sliceMax);
+      const plane1 = new THREE.Plane(nMin, -minP);
+      const plane2 = new THREE.Plane(nMax, maxP);
+      desiredPlanes.push(plane1, plane2);
+
+      if (showHelper) {
+        const box = this.getModelBoundingBox();
+        const s = box ? Math.max(box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z) * 1.5 : 20;
+        this.clippingHelpersGroup.add(new THREE.PlaneHelper(plane1, s, 0x58a6ff));
+        this.clippingHelpersGroup.add(new THREE.PlaneHelper(plane2, s, 0xf0883e));
+      }
+    } else if (mode === "box") {
+      const minX = Math.min(boxMin.x, boxMax.x);
+      const maxX = Math.max(boxMin.x, boxMax.x);
+      const minY = Math.min(boxMin.y, boxMax.y);
+      const maxY = Math.max(boxMin.y, boxMax.y);
+      const minZ = Math.min(boxMin.z, boxMax.z);
+      const maxZ = Math.max(boxMin.z, boxMax.z);
+
+      const pX1 = new THREE.Plane(new THREE.Vector3(1, 0, 0), -minX);
+      const pX2 = new THREE.Plane(new THREE.Vector3(-1, 0, 0), maxX);
+      const pY1 = new THREE.Plane(new THREE.Vector3(0, 1, 0), -minY);
+      const pY2 = new THREE.Plane(new THREE.Vector3(0, -1, 0), maxY);
+      const pZ1 = new THREE.Plane(new THREE.Vector3(0, 0, 1), -minZ);
+      const pZ2 = new THREE.Plane(new THREE.Vector3(0, 0, -1), maxZ);
+      desiredPlanes.push(pX1, pX2, pY1, pY2, pZ1, pZ2);
+
+      if (showHelper) {
+        const b3 = new THREE.Box3(
+          new THREE.Vector3(minX, minY, minZ),
+          new THREE.Vector3(maxX, maxY, maxZ),
+        );
+        this.clippingHelpersGroup.add(new THREE.Box3Helper(b3, new THREE.Color(0xf0883e)));
+      }
+    }
+
+    for (const p of this.activePlanes) {
+      renderer.setPlane(false, p);
+    }
+    this.activePlanes = desiredPlanes;
+    for (const p of this.activePlanes) {
+      renderer.setPlane(true, p);
+    }
+
+    this.world?.renderer?.update();
+  }
+
+  /**
    * Horizontal clipping plane at `height`, hiding everything above it.
    *
    * Deliberately does not use OBC.Clipper. Its SimplePlane constructor builds a
@@ -1298,33 +1507,111 @@ export class Viewer {
    * mechanism SimplePlane's own `enabled` setter uses.
    */
   setClippingPlane(enabled: boolean, height = 0): void {
-    const renderer = this.world.renderer;
-    if (!renderer) return;
-
     if (!enabled) {
-      if (this.clipPlane) renderer.setPlane(false, this.clipPlane);
-      this.clipPlane = null;
+      this.clearClipping();
       return;
     }
-
-    if (this.clipPlane) {
-      // For normal (0,-1,0) the plane is -y + constant = 0, so a cut at
-      // `height` is constant = height.
-      this.clipPlane.constant = height;
-      return;
-    }
-    this.clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), height);
-    renderer.setPlane(true, this.clipPlane);
+    this.setClippingState({
+      enabled: true,
+      mode: "plane",
+      axis: "y",
+      inverted: false,
+      planePos: height,
+    });
   }
 
-  getModelHeightRange(): { min: number; max: number } | null {
+  /**
+   * Clears all clipping planes and helpers.
+   */
+  clearClipping(): void {
+    this.setClippingState({ enabled: false });
+  }
+
+  /**
+   * Fits the section box tightly around the currently selected element (plus padding).
+   * Automatically activates Section Box mode.
+   */
+  async fitSectionBoxToSelection(padding = 0.5): Promise<boolean> {
+    const model = this.currentModel;
+    if (!model || !this.lastSelection) return false;
+
+    let selBox: THREE.Box3 | null = null;
+    try {
+      selBox = await model.getMergedBox([this.lastSelection.expressId]);
+    } catch {
+      return false;
+    }
+    if (!selBox || selBox.isEmpty()) return false;
+
+    selBox.expandByScalar(padding);
+
+    const modelBox = this.getModelBoundingBox();
+    if (modelBox) {
+      selBox.min.x = Math.max(selBox.min.x, modelBox.min.x);
+      selBox.min.y = Math.max(selBox.min.y, modelBox.min.y);
+      selBox.min.z = Math.max(selBox.min.z, modelBox.min.z);
+      selBox.max.x = Math.min(selBox.max.x, modelBox.max.x);
+      selBox.max.y = Math.min(selBox.max.y, modelBox.max.y);
+      selBox.max.z = Math.min(selBox.max.z, modelBox.max.z);
+    }
+
+    this.setClippingState({
+      enabled: true,
+      mode: "box",
+      boxMin: { x: selBox.min.x, y: selBox.min.y, z: selBox.min.z },
+      boxMax: { x: selBox.max.x, y: selBox.max.y, z: selBox.max.z },
+    });
+    return true;
+  }
+
+  /**
+   * Resets Section Box bounds to the model's full bounding box.
+   */
+  resetSectionBox(): void {
+    const box = this.getModelBoundingBox();
+    if (!box) return;
+    this.setClippingState({
+      boxMin: { x: box.min.x, y: box.min.y, z: box.min.z },
+      boxMax: { x: box.max.x, y: box.max.y, z: box.max.z },
+    });
+  }
+
+  /**
+   * Returns model's full 3D bounding box in world coordinates.
+   */
+  getModelBoundingBox(): THREE.Box3 | null {
     if (!this.currentModel) return null;
     let box = this.currentModel.box;
     if (!box || !Number.isFinite(box.min.y) || !Number.isFinite(box.max.y) || box.isEmpty()) {
       box = new THREE.Box3().setFromObject(this.currentModel.object);
     }
-    if (!Number.isFinite(box.min.y) || !Number.isFinite(box.max.y) || box.isEmpty()) return null;
-    return { min: box.min.y, max: box.max.y };
+    if (!Number.isFinite(box.min.x) || !Number.isFinite(box.max.x) || box.isEmpty()) return null;
+    return box.clone();
+  }
+
+  /**
+   * Returns model min and max extent along a specific axis.
+   */
+  getModelAxisRange(axis: ClipAxis): { min: number; max: number } | null {
+    const box = this.getModelBoundingBox();
+    if (!box) return null;
+    return { min: box.min[axis], max: box.max[axis] };
+  }
+
+  /**
+   * Returns model min and max height (Y axis). Preserved for backward compatibility.
+   */
+  getModelHeightRange(): { min: number; max: number } | null {
+    return this.getModelAxisRange("y");
+  }
+
+  /** Backward compatibility property getter. */
+  private get clipPlane(): THREE.Plane | null {
+    return this.activePlanes[0] ?? null;
+  }
+
+  debugClippingState(): Readonly<ClippingState> {
+    return this.getClippingState();
   }
 
   getSelection(): Selection | null {
