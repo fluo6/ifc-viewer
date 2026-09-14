@@ -173,6 +173,7 @@ export class Viewer {
   private clippingHelpersGroup = new THREE.Group();
   private clippingGizmosGroup = new THREE.Group();
   private gizmos: { proxy: THREE.Mesh; control: TransformControls }[] = [];
+  private lastGizmoConfig = "";
   private isDraggingGizmo = false;
   private clipState: ClippingState = {
     enabled: false,
@@ -1505,77 +1506,100 @@ export class Viewer {
   private syncGizmos(): void {
     if (this.isDraggingGizmo) return;
 
-    for (const g of this.gizmos) {
-      g.control.detach();
-      g.control.dispose();
-      this.clippingGizmosGroup.remove(g.proxy);
-      this.clippingGizmosGroup.remove(g.control as any);
-    }
-    this.gizmos = [];
+    const { mode, axis, planePos, sliceMin, sliceMax, boxMin, boxMax, enabled, showHelper } = this.clipState;
+    const configStr = `${enabled}-${showHelper}-${mode}-${axis}`;
+    const structuralChange = configStr !== this.lastGizmoConfig;
+    this.lastGizmoConfig = configStr;
 
-    if (!this.clipState.enabled || !this.clipState.showHelper || !this.currentModel) {
-      this.world?.renderer?.update();
-      return;
-    }
+    if (structuralChange) {
+      for (const g of this.gizmos) {
+        g.control.detach();
+        g.control.dispose();
+        this.clippingGizmosGroup.remove(g.proxy);
+        this.clippingGizmosGroup.remove(g.control as any);
+      }
+      this.gizmos = [];
 
-    const { mode, axis, planePos, sliceMin, sliceMax, boxMin, boxMax } = this.clipState;
-    const box = this.getModelBoundingBox();
-    const center = box ? box.getCenter(new THREE.Vector3()) : new THREE.Vector3();
+      if (!enabled || !showHelper || !this.currentModel) {
+        this.world?.renderer?.update();
+        return;
+      }
 
-    const createGizmo = (
-      gizmoAxis: ClipAxis,
-      initialPos: number,
-      onDrag: (val: number) => void
-    ) => {
-      const proxy = new THREE.Mesh(
-        new THREE.BoxGeometry(0.1, 0.1, 0.1),
-        new THREE.MeshBasicMaterial({ visible: false })
-      );
-      proxy.position.copy(center);
-      proxy.position[gizmoAxis] = initialPos;
-      this.clippingGizmosGroup.add(proxy);
+      const box = this.getModelBoundingBox();
+      const center = box ? box.getCenter(new THREE.Vector3()) : new THREE.Vector3();
 
-      const control = new TransformControls(
-        this.world.camera.three,
-        this.world.renderer!.three.domElement
-      );
-      control.attach(proxy);
-      control.showX = gizmoAxis === "x";
-      control.showY = gizmoAxis === "y";
-      control.showZ = gizmoAxis === "z";
-      control.showXY = false;
-      control.showXZ = false;
-      control.showYZ = false;
-      control.size = 1.25;
-      control.setMode("translate");
+      const createGizmo = (
+        gizmoAxis: ClipAxis,
+        initialPos: number,
+        onDrag: (val: number) => void
+      ) => {
+        const proxy = new THREE.Mesh(
+          new THREE.BoxGeometry(0.1, 0.1, 0.1),
+          new THREE.MeshBasicMaterial({ visible: false })
+        );
+        proxy.position.copy(center);
+        proxy.position[gizmoAxis] = initialPos;
+        this.clippingGizmosGroup.add(proxy);
 
-      control.addEventListener("dragging-changed", (event: any) => {
-        this.isDraggingGizmo = event.value;
-        this.world.camera.controls.enabled = !event.value;
-      });
+        const control = new TransformControls(
+          this.world.camera.three,
+          this.world.renderer!.three.domElement
+        );
+        control.attach(proxy);
+        control.showX = gizmoAxis === "x";
+        control.showY = gizmoAxis === "y";
+        control.showZ = gizmoAxis === "z";
+        control.showXY = false;
+        control.showXZ = false;
+        control.showYZ = false;
+        control.size = 1.25;
+        control.setMode("translate");
 
-      control.addEventListener("change", () => {
-        if (this.isDraggingGizmo) {
-          onDrag(proxy.position[gizmoAxis]);
+        control.addEventListener("dragging-changed", (event: any) => {
+          this.isDraggingGizmo = event.value;
+          this.world.camera.controls.enabled = !event.value;
+        });
+
+        control.addEventListener("change", () => {
+          if (this.isDraggingGizmo) {
+            onDrag(proxy.position[gizmoAxis]);
+          }
+        });
+
+        this.clippingGizmosGroup.add(control as any);
+        this.gizmos.push({ proxy, control });
+      };
+
+      if (mode === "plane") {
+        createGizmo(axis, planePos, (val) => this.setClippingState({ planePos: val }));
+      } else if (mode === "slice") {
+        createGizmo(axis, sliceMin, (val) => this.setClippingState({ sliceMin: val }));
+        createGizmo(axis, sliceMax, (val) => this.setClippingState({ sliceMax: val }));
+      } else if (mode === "box") {
+        createGizmo("x", boxMin.x, (val) => this.setClippingState({ boxMin: { ...this.clipState.boxMin, x: val } }));
+        createGizmo("x", boxMax.x, (val) => this.setClippingState({ boxMax: { ...this.clipState.boxMax, x: val } }));
+        createGizmo("y", boxMin.y, (val) => this.setClippingState({ boxMin: { ...this.clipState.boxMin, y: val } }));
+        createGizmo("y", boxMax.y, (val) => this.setClippingState({ boxMax: { ...this.clipState.boxMax, y: val } }));
+        createGizmo("z", boxMin.z, (val) => this.setClippingState({ boxMin: { ...this.clipState.boxMin, z: val } }));
+        createGizmo("z", boxMax.z, (val) => this.setClippingState({ boxMax: { ...this.clipState.boxMax, z: val } }));
+      }
+    } else {
+      // Not a structural change, just sync proxy positions
+      if (this.gizmos.length > 0 && enabled && showHelper && this.currentModel) {
+        if (mode === "plane" && this.gizmos[0]) {
+          this.gizmos[0].proxy.position[axis] = planePos;
+        } else if (mode === "slice" && this.gizmos.length >= 2) {
+          this.gizmos[0].proxy.position[axis] = sliceMin;
+          this.gizmos[1].proxy.position[axis] = sliceMax;
+        } else if (mode === "box" && this.gizmos.length >= 6) {
+          this.gizmos[0].proxy.position["x"] = boxMin.x;
+          this.gizmos[1].proxy.position["x"] = boxMax.x;
+          this.gizmos[2].proxy.position["y"] = boxMin.y;
+          this.gizmos[3].proxy.position["y"] = boxMax.y;
+          this.gizmos[4].proxy.position["z"] = boxMin.z;
+          this.gizmos[5].proxy.position["z"] = boxMax.z;
         }
-      });
-
-      this.clippingGizmosGroup.add(control as any);
-      this.gizmos.push({ proxy, control });
-    };
-
-    if (mode === "plane") {
-      createGizmo(axis, planePos, (val) => this.setClippingState({ planePos: val }));
-    } else if (mode === "slice") {
-      createGizmo(axis, sliceMin, (val) => this.setClippingState({ sliceMin: val }));
-      createGizmo(axis, sliceMax, (val) => this.setClippingState({ sliceMax: val }));
-    } else if (mode === "box") {
-      createGizmo("x", boxMin.x, (val) => this.setClippingState({ boxMin: { ...this.clipState.boxMin, x: val } }));
-      createGizmo("x", boxMax.x, (val) => this.setClippingState({ boxMax: { ...this.clipState.boxMax, x: val } }));
-      createGizmo("y", boxMin.y, (val) => this.setClippingState({ boxMin: { ...this.clipState.boxMin, y: val } }));
-      createGizmo("y", boxMax.y, (val) => this.setClippingState({ boxMax: { ...this.clipState.boxMax, y: val } }));
-      createGizmo("z", boxMin.z, (val) => this.setClippingState({ boxMin: { ...this.clipState.boxMin, z: val } }));
-      createGizmo("z", boxMax.z, (val) => this.setClippingState({ boxMax: { ...this.clipState.boxMax, z: val } }));
+      }
     }
   }
 
