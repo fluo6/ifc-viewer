@@ -390,3 +390,68 @@ test("clipper UI renders buttons and interacts with modes", async () => {
   }
 });
 
+test("clipping updates keep the active slider mounted until its drag ends", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    await page.locator("#clipper-toggle").click();
+
+    const slider = page.locator("#clipper .clip-slider");
+    const bounds = await slider.boundingBox();
+    expect(bounds).not.toBeNull();
+
+    await slider.evaluate((element) => {
+      (window as any).__activeClipSlider = element;
+    });
+    await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+    await page.mouse.down();
+
+    await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      viewer.setClippingState({ planePos: viewer.getClippingState().planePos });
+    });
+
+    expect(
+      await page.evaluate(
+        () => document.querySelector("#clipper .clip-slider") === (window as any).__activeClipSlider,
+      ),
+      "a clipping update replaced the slider while its pointer gesture was active",
+    ).toBe(true);
+
+    await page.mouse.up();
+  } finally {
+    await app.close();
+  }
+});
+
+test("gizmo dragging defers clipper rendering until the drag ends", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    await page.locator("#clipper-toggle").click();
+    await page.getByTitle("Toggle 3D clipping helper wireframes in viewport").click();
+
+    const result = await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      const originalSlider = document.querySelector("#clipper .clip-slider");
+      const control = viewer.gizmos[0]?.control;
+      if (!originalSlider || !control) return null;
+
+      control.dispatchEvent({ type: "dragging-changed", value: true });
+      viewer.setClippingState({ planePos: viewer.getClippingState().planePos + 0.01 });
+      const keptDuringDrag = document.querySelector("#clipper .clip-slider") === originalSlider;
+
+      control.dispatchEvent({ type: "dragging-changed", value: false });
+      const refreshedAfterDrag = document.querySelector("#clipper .clip-slider") !== originalSlider;
+      return { keptDuringDrag, refreshedAfterDrag };
+    });
+
+    expect(result).not.toBeNull();
+    expect(result?.keptDuringDrag, "gizmo updates rebuilt the clipper during an active drag").toBe(true);
+    expect(result?.refreshedAfterDrag, "the clipper did not refresh when the gizmo drag ended").toBe(true);
+  } finally {
+    await app.close();
+  }
+});

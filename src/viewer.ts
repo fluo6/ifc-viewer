@@ -174,7 +174,7 @@ export class Viewer {
   private clippingGizmosGroup = new THREE.Group();
   private gizmos: { proxy: THREE.Mesh; control: TransformControls }[] = [];
   private lastGizmoConfig = "";
-  private isDraggingGizmo = false;
+  private gizmoDragging = false;
   private clipState: ClippingState = {
     enabled: false,
     mode: "plane",
@@ -188,6 +188,10 @@ export class Viewer {
     showHelper: false,
   };
   readonly onClippingChanged = new Emitter<ClippingState>();
+
+  get isDraggingGizmo(): boolean {
+    return this.gizmoDragging;
+  }
 
   /**
    * Raw-IFC reader kept open alongside the fragments. OBC's IfcLoader strips
@@ -1504,7 +1508,7 @@ export class Viewer {
   }
 
   private syncGizmos(): void {
-    if (this.isDraggingGizmo) return;
+    if (this.gizmoDragging) return;
 
     const { mode, axis, planePos, sliceMin, sliceMax, boxMin, boxMax, enabled, showHelper } = this.clipState;
     const configStr = `${enabled}-${showHelper}-${mode}-${axis}`;
@@ -1556,12 +1560,13 @@ export class Viewer {
         control.setMode("translate");
 
         control.addEventListener("dragging-changed", (event: any) => {
-          this.isDraggingGizmo = event.value;
+          this.gizmoDragging = event.value;
           this.world.camera.controls.enabled = !event.value;
+          if (!event.value) this.onClippingChanged.emit(this.clipState);
         });
 
         control.addEventListener("change", () => {
-          if (this.isDraggingGizmo) {
+          if (this.gizmoDragging) {
             onDrag(proxy.position[gizmoAxis]);
           }
         });
