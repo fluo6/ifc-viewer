@@ -6,6 +6,7 @@ release/
 *.log
 .DS_Store
 .superpowers/
+.worktrees/
 test-results/
 playwright-report/
 # Exports land wherever the save dialog was last pointed, often the repo root.
