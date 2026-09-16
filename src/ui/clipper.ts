@@ -89,8 +89,8 @@ export function mountClipper(viewer: Viewer): void {
           const centerY = (bounds.min.y + bounds.max.y) / 2;
           viewer.setClippingState({
             enabled: true,
-            planePos: state.planePos || centerY,
-          });
+            planePos: (state as any).planePos || centerY,
+          } as any);
         } else {
           viewer.setClippingState({ enabled: true });
         }
@@ -164,12 +164,12 @@ export function mountClipper(viewer: Viewer): void {
     const axes: ClipAxis[] = ["x", "y", "z"];
     for (const ax of axes) {
       const btn = document.createElement("button");
-      btn.className = `mini ${state.axis === ax ? "active" : ""}`;
+      btn.className = `mini ${(state as any).axis === ax ? "active" : ""}`;
       btn.textContent = ax.toUpperCase();
       btn.title = `Cut along ${ax.toUpperCase()} axis`;
       btn.addEventListener("click", () => {
-        if (state.axis !== ax) {
-          viewer.setClippingState({ axis: ax });
+        if ((state as any).axis !== ax) {
+          viewer.setClippingState({ axis: ax } as any);
         }
       });
       axisGroup.appendChild(btn);
@@ -178,16 +178,16 @@ export function mountClipper(viewer: Viewer): void {
 
     // Flip button
     const flipBtn = document.createElement("button");
-    flipBtn.className = `mini ${state.inverted ? "active" : ""}`;
+    flipBtn.className = `mini ${(state as any).inverted ? "active" : ""}`;
     flipBtn.textContent = "⇅ Flip";
     flipBtn.title = "Invert cutting normal direction";
     flipBtn.addEventListener("click", () => {
-      viewer.setClippingState({ inverted: !state.inverted });
+      viewer.setClippingState({ inverted: !(state as any).inverted } as any);
     });
     root.appendChild(flipBtn);
 
     // Position slider
-    const range = viewer.getModelAxisRange(state.axis) ?? { min: 0, max: 1 };
+    const range = viewer.getModelAxisRange((state as any).axis) ?? { min: 0, max: 1 };
     const span = range.max - range.min || 1;
     const slider = document.createElement("input");
     slider.type = "range";
@@ -195,18 +195,18 @@ export function mountClipper(viewer: Viewer): void {
     slider.min = String(range.min);
     slider.max = String(range.max);
     slider.step = String(span / 200);
-    slider.value = String(state.planePos);
+    slider.value = String((state as any).planePos);
     slider.style.width = "100px";
     trackSliderInteraction(slider);
 
     const valSpan = document.createElement("span");
     valSpan.className = "clip-val";
-    valSpan.textContent = `${state.axis.toUpperCase()}: ${state.planePos.toFixed(2)}m`;
+    valSpan.textContent = `${(state as any).axis.toUpperCase()}: ${(state as any).planePos.toFixed(2)}m`;
 
     slider.addEventListener("input", () => {
       const v = parseFloat(slider.value);
-      valSpan.textContent = `${state.axis.toUpperCase()}: ${v.toFixed(2)}m`;
-      viewer.setClippingState({ planePos: v });
+      valSpan.textContent = `${(state as any).axis.toUpperCase()}: ${v.toFixed(2)}m`;
+      viewer.setClippingState({ planePos: v } as any);
     });
 
     root.appendChild(slider);
@@ -220,19 +220,19 @@ export function mountClipper(viewer: Viewer): void {
     const axes: ClipAxis[] = ["x", "y", "z"];
     for (const ax of axes) {
       const btn = document.createElement("button");
-      btn.className = `mini ${state.axis === ax ? "active" : ""}`;
+      btn.className = `mini ${(state as any).axis === ax ? "active" : ""}`;
       btn.textContent = ax.toUpperCase();
       btn.title = `Slice along ${ax.toUpperCase()} axis`;
       btn.addEventListener("click", () => {
-        if (state.axis !== ax) {
-          viewer.setClippingState({ axis: ax });
+        if ((state as any).axis !== ax) {
+          viewer.setClippingState({ axis: ax } as any);
         }
       });
       axisGroup.appendChild(btn);
     }
     root.appendChild(axisGroup);
 
-    const range = viewer.getModelAxisRange(state.axis) ?? { min: 0, max: 1 };
+    const range = viewer.getModelAxisRange((state as any).axis) ?? { min: 0, max: 1 };
     const span = range.max - range.min || 1;
     const step = String(span / 200);
 
@@ -248,18 +248,18 @@ export function mountClipper(viewer: Viewer): void {
     minSlider.min = String(range.min);
     minSlider.max = String(range.max);
     minSlider.step = step;
-    minSlider.value = String(state.sliceMin);
+    minSlider.value = String((state as any).sliceMin);
     minSlider.style.width = "70px";
     trackSliderInteraction(minSlider);
 
     const minVal = document.createElement("span");
     minVal.className = "clip-val";
-    minVal.textContent = `${state.sliceMin.toFixed(2)}m`;
+    minVal.textContent = `${(state as any).sliceMin.toFixed(2)}m`;
 
     minSlider.addEventListener("input", () => {
       const v = parseFloat(minSlider.value);
       minVal.textContent = `${v.toFixed(2)}m`;
-      viewer.setClippingState({ sliceMin: v });
+      viewer.setClippingState({ sliceMin: v } as any);
     });
 
     root.appendChild(minSlider);
@@ -277,18 +277,18 @@ export function mountClipper(viewer: Viewer): void {
     maxSlider.min = String(range.min);
     maxSlider.max = String(range.max);
     maxSlider.step = step;
-    maxSlider.value = String(state.sliceMax);
+    maxSlider.value = String((state as any).sliceMax);
     maxSlider.style.width = "70px";
     trackSliderInteraction(maxSlider);
 
     const maxVal = document.createElement("span");
     maxVal.className = "clip-val";
-    maxVal.textContent = `${state.sliceMax.toFixed(2)}m`;
+    maxVal.textContent = `${(state as any).sliceMax.toFixed(2)}m`;
 
     maxSlider.addEventListener("input", () => {
       const v = parseFloat(maxSlider.value);
       maxVal.textContent = `${v.toFixed(2)}m`;
-      viewer.setClippingState({ sliceMax: v });
+      viewer.setClippingState({ sliceMax: v } as any);
     });
 
     root.appendChild(maxSlider);
@@ -393,24 +393,24 @@ export function mountClipper(viewer: Viewer): void {
         minKey: "x",
         modelMin: bounds.min.x,
         modelMax: bounds.max.x,
-        curMin: state.boxMin.x,
-        curMax: state.boxMax.x,
+        curMin: (state as any).boxMin.x,
+        curMax: (state as any).boxMax.x,
       },
       {
         axis: "y",
         minKey: "y",
         modelMin: bounds.min.y,
         modelMax: bounds.max.y,
-        curMin: state.boxMin.y,
-        curMax: state.boxMax.y,
+        curMin: (state as any).boxMin.y,
+        curMax: (state as any).boxMax.y,
       },
       {
         axis: "z",
         minKey: "z",
         modelMin: bounds.min.z,
         modelMax: bounds.max.z,
-        curMin: state.boxMin.z,
-        curMax: state.boxMax.z,
+        curMin: (state as any).boxMin.z,
+        curMax: (state as any).boxMax.z,
       },
     ];
 
@@ -447,8 +447,8 @@ export function mountClipper(viewer: Viewer): void {
       minSlider.addEventListener("input", () => {
         const val = parseFloat(minSlider.value);
         minVal.textContent = `${val.toFixed(2)}m`;
-        const updatedMin = { ...viewer.getClippingState().boxMin, [cfg.minKey]: val };
-        viewer.setClippingState({ boxMin: updatedMin });
+        const updatedMin = { ...(viewer.getClippingState() as any).boxMin, [cfg.minKey]: val };
+        viewer.setClippingState({ boxMin: updatedMin } as any);
       });
 
       row.appendChild(minSlider);
@@ -475,8 +475,8 @@ export function mountClipper(viewer: Viewer): void {
       maxSlider.addEventListener("input", () => {
         const val = parseFloat(maxSlider.value);
         maxVal.textContent = `${val.toFixed(2)}m`;
-        const updatedMax = { ...viewer.getClippingState().boxMax, [cfg.minKey]: val };
-        viewer.setClippingState({ boxMax: updatedMax });
+        const updatedMax = { ...(viewer.getClippingState() as any).boxMax, [cfg.minKey]: val };
+        viewer.setClippingState({ boxMax: updatedMax } as any);
       });
 
       row.appendChild(maxSlider);

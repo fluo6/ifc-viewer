@@ -455,3 +455,27 @@ test("gizmo dragging defers clipper rendering until the drag ends", async () => 
     await app.close();
   }
 });
+
+test("clipping state preserves a freely oriented plane transform", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const rotation = { x: 0, y: Math.SQRT1_2, z: 0, w: Math.SQRT1_2 };
+    const position = { x: 1, y: 2, z: 3 };
+    const state = await page.evaluate(({ position, rotation }) => {
+      const viewer = (window as any).__viewer;
+      viewer.setClippingState({
+        enabled: true,
+        mode: "plane",
+        transform: { position, rotation },
+      });
+      return viewer.getClippingState();
+    }, { position, rotation });
+
+    expect(state.transform.position).toEqual(position);
+    expect(state.transform.rotation).toEqual(rotation);
+  } finally {
+    await app.close();
+  }
+});

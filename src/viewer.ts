@@ -43,18 +43,27 @@ export interface Point3 {
 }
 
 export type ClipAxis = "x" | "y" | "z";
+
+export interface QuaternionData {
+  x: number;
+  y: number;
+  z: number;
+  w: number;
+}
+
+export interface ClipTransform {
+  position: Point3;
+  rotation: QuaternionData;
+}
 export type ClipMode = "plane" | "slice" | "box";
 
 export interface ClippingState {
   enabled: boolean;
   mode: ClipMode;
-  axis: ClipAxis;
-  inverted: boolean;
-  planePos: number;
-  sliceMin: number;
-  sliceMax: number;
-  boxMin: Point3;
-  boxMax: Point3;
+  transform: ClipTransform;
+  planeSize: { x: number; y: number };
+  sliceDepth: number;
+  boxSize: Point3;
   showHelper: boolean;
 }
 
@@ -178,13 +187,10 @@ export class Viewer {
   private clipState: ClippingState = {
     enabled: false,
     mode: "plane",
-    axis: "y",
-    inverted: false,
-    planePos: 0,
-    sliceMin: 0,
-    sliceMax: 1,
-    boxMin: { x: 0, y: 0, z: 0 },
-    boxMax: { x: 1, y: 1, z: 1 },
+    transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 } },
+    planeSize: { x: 1, y: 1 },
+    sliceDepth: 1,
+    boxSize: { x: 1, y: 1, z: 1 },
     showHelper: false,
   };
   readonly onClippingChanged = new Emitter<ClippingState>();
@@ -1341,18 +1347,18 @@ export class Viewer {
   private initClippingStateForModel(): void {
     const box = this.getModelBoundingBox();
     if (!box) return;
-    const centerY = (box.min.y + box.max.y) / 2;
-    const spanY = box.max.y - box.min.y;
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
     this.clipState = {
       enabled: false,
       mode: "plane",
-      axis: "y",
-      inverted: false,
-      planePos: centerY,
-      sliceMin: box.min.y + spanY * 0.25,
-      sliceMax: box.min.y + spanY * 0.75,
-      boxMin: { x: box.min.x, y: box.min.y, z: box.min.z },
-      boxMax: { x: box.max.x, y: box.max.y, z: box.max.z },
+      transform: {
+        position: { x: center.x, y: center.y, z: center.z },
+        rotation: { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 }
+      },
+      planeSize: { x: size.x, y: size.z },
+      sliceDepth: size.y * 0.5,
+      boxSize: { x: size.x, y: size.y, z: size.z },
       showHelper: false,
     };
   }
@@ -1368,20 +1374,52 @@ export class Viewer {
    * Updates clipping configuration and applies the resulting planes to the renderer.
    */
   setClippingState(updates: Partial<ClippingState>): void {
-    const prevAxis = this.clipState.axis;
-    this.clipState = { ...this.clipState, ...updates };
+    if (updates.transform) {
+      const { position, rotation } = updates.transform;
+      if (!Number.isFinite(position.x) || !Number.isFinite(position.y) || !Number.isFinite(position.z)) return;
+      if (!Number.isFinite(rotation.x) || !Number.isFinite(rotation.y) || !Number.isFinite(rotation.z) || !Number.isFinite(rotation.w)) return;
+      
+      const lenSq = rotation.x**2 + rotation.y**2 + rotation.z**2 + rotation.w**2;
+      if (lenSq < 1e-10) {
+        updates.transform.rotation = { x: 0, y: 0, z: 0, w: 1 };
+      } else {
+        const len = Math.sqrt(lenSq);
+        updates.transform.rotation = {
+          x: rotation.x / len,
+          y: rotation.y / len,
+          z: rotation.z / len,
+          w: rotation.w / len,
+        };
+      }
+    }
+    
+    if (updates.sliceDepth !== undefined) updates.sliceDepth = Math.max(updates.sliceDepth, 0.001);
+    if (updates.planeSize !== undefined) {
+      updates.planeSize.x = Math.max(updates.planeSize.x, 0.001);
+      updates.planeSize.y = Math.max(updates.planeSize.y, 0.001);
+    }
+    if (updates.boxSize !== undefined) {
+      updates.boxSize.x = Math.max(updates.boxSize.x, 0.001);
+      updates.boxSize.y = Math.max(updates.boxSize.y, 0.001);
+      updates.boxSize.z = Math.max(updates.boxSize.z, 0.001);
+    }
 
-    // When switching axis without specifying a plane position, reset to that axis's center and slice defaults
-    if (updates.axis && updates.axis !== prevAxis && updates.planePos === undefined) {
-      const range = this.getModelAxisRange(this.clipState.axis);
-      if (range) {
-        this.clipState.planePos = (range.min + range.max) / 2;
-        const span = range.max - range.min;
-        this.clipState.sliceMin = range.min + span * 0.25;
-        this.clipState.sliceMax = range.min + span * 0.75;
+    const prevMode = this.clipState.mode;
+    if (updates.mode && updates.mode !== prevMode) {
+      const box = this.getModelBoundingBox();
+      if (box) {
+        const size = box.getSize(new THREE.Vector3());
+        if (updates.mode === "plane" && !updates.planeSize && !this.clipState.planeSize) {
+           updates.planeSize = { x: size.x, y: size.z };
+        } else if (updates.mode === "slice" && updates.sliceDepth === undefined && this.clipState.sliceDepth === undefined) {
+           updates.sliceDepth = size.y * 0.5;
+        } else if (updates.mode === "box" && !updates.boxSize && !this.clipState.boxSize) {
+           updates.boxSize = { x: size.x, y: size.y, z: size.z };
+        }
       }
     }
 
+    this.clipState = { ...this.clipState, ...updates };
     this.syncClippingPlanes();
     this.onClippingChanged.emit(this.clipState);
   }
@@ -1422,7 +1460,8 @@ export class Viewer {
     }
 
     const desiredPlanes: THREE.Plane[] = [];
-    const { mode, axis, inverted, planePos, sliceMin, sliceMax, boxMin, boxMax, showHelper } = this.clipState;
+    const { mode, showHelper } = this.clipState;
+    const { axis, inverted, planePos, sliceMin, sliceMax, boxMin, boxMax } = this.clipState as any;
 
     if (mode === "plane") {
       const normal = new THREE.Vector3();
@@ -1510,7 +1549,8 @@ export class Viewer {
   private syncGizmos(): void {
     if (this.gizmoDragging) return;
 
-    const { mode, axis, planePos, sliceMin, sliceMax, boxMin, boxMax, enabled, showHelper } = this.clipState;
+    const { mode, enabled, showHelper } = this.clipState;
+    const { axis, planePos, sliceMin, sliceMax, boxMin, boxMax } = this.clipState as any;
     const configStr = `${enabled}-${showHelper}-${mode}-${axis}`;
     const structuralChange = configStr !== this.lastGizmoConfig;
     this.lastGizmoConfig = configStr;
@@ -1576,26 +1616,26 @@ export class Viewer {
       };
 
       if (mode === "plane") {
-        createGizmo(axis, planePos, (val) => this.setClippingState({ planePos: val }));
+        createGizmo(axis, planePos, (val) => this.setClippingState({ planePos: val } as any));
       } else if (mode === "slice") {
-        createGizmo(axis, sliceMin, (val) => this.setClippingState({ sliceMin: val }));
-        createGizmo(axis, sliceMax, (val) => this.setClippingState({ sliceMax: val }));
+        createGizmo(axis, sliceMin, (val) => this.setClippingState({ sliceMin: val } as any));
+        createGizmo(axis, sliceMax, (val) => this.setClippingState({ sliceMax: val } as any));
       } else if (mode === "box") {
-        createGizmo("x", boxMin.x, (val) => this.setClippingState({ boxMin: { ...this.clipState.boxMin, x: val } }));
-        createGizmo("x", boxMax.x, (val) => this.setClippingState({ boxMax: { ...this.clipState.boxMax, x: val } }));
-        createGizmo("y", boxMin.y, (val) => this.setClippingState({ boxMin: { ...this.clipState.boxMin, y: val } }));
-        createGizmo("y", boxMax.y, (val) => this.setClippingState({ boxMax: { ...this.clipState.boxMax, y: val } }));
-        createGizmo("z", boxMin.z, (val) => this.setClippingState({ boxMin: { ...this.clipState.boxMin, z: val } }));
-        createGizmo("z", boxMax.z, (val) => this.setClippingState({ boxMax: { ...this.clipState.boxMax, z: val } }));
+        createGizmo("x", boxMin.x, (val) => this.setClippingState({ boxMin: { ...(this.clipState as any).boxMin, x: val } } as any));
+        createGizmo("x", boxMax.x, (val) => this.setClippingState({ boxMax: { ...(this.clipState as any).boxMax, x: val } } as any));
+        createGizmo("y", boxMin.y, (val) => this.setClippingState({ boxMin: { ...(this.clipState as any).boxMin, y: val } } as any));
+        createGizmo("y", boxMax.y, (val) => this.setClippingState({ boxMax: { ...(this.clipState as any).boxMax, y: val } } as any));
+        createGizmo("z", boxMin.z, (val) => this.setClippingState({ boxMin: { ...(this.clipState as any).boxMin, z: val } } as any));
+        createGizmo("z", boxMax.z, (val) => this.setClippingState({ boxMax: { ...(this.clipState as any).boxMax, z: val } } as any));
       }
     } else {
       // Not a structural change, just sync proxy positions
       if (this.gizmos.length > 0 && enabled && showHelper && this.currentModel) {
         if (mode === "plane" && this.gizmos[0]) {
-          this.gizmos[0].proxy.position[axis] = planePos;
+          (this.gizmos[0].proxy.position as any)[axis] = planePos;
         } else if (mode === "slice" && this.gizmos.length >= 2) {
-          this.gizmos[0].proxy.position[axis] = sliceMin;
-          this.gizmos[1].proxy.position[axis] = sliceMax;
+          (this.gizmos[0].proxy.position as any)[axis] = sliceMin;
+          (this.gizmos[1].proxy.position as any)[axis] = sliceMax;
         } else if (mode === "box" && this.gizmos.length >= 6) {
           this.gizmos[0].proxy.position["x"] = boxMin.x;
           this.gizmos[1].proxy.position["x"] = boxMax.x;
@@ -1631,9 +1671,10 @@ export class Viewer {
     this.setClippingState({
       enabled: true,
       mode: "plane",
-      axis: "y",
-      inverted: false,
-      planePos: height,
+      transform: {
+        position: { x: 0, y: height, z: 0 },
+        rotation: { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 }
+      },
     });
   }
 
@@ -1677,7 +1718,7 @@ export class Viewer {
       mode: "box",
       boxMin: { x: selBox.min.x, y: selBox.min.y, z: selBox.min.z },
       boxMax: { x: selBox.max.x, y: selBox.max.y, z: selBox.max.z },
-    });
+    } as any);
     return true;
   }
 
@@ -1690,7 +1731,7 @@ export class Viewer {
     this.setClippingState({
       boxMin: { x: box.min.x, y: box.min.y, z: box.min.z },
       boxMax: { x: box.max.x, y: box.max.y, z: box.max.z },
-    });
+    } as any);
   }
 
   /**
