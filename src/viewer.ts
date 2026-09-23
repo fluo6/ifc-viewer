@@ -1,3 +1,4 @@
+import { ClippingGumball } from "./clipping-gumball";
 import * as OBC from "@thatopen/components";
 import * as OBF from "@thatopen/components-front";
 import * as FRAGS from "@thatopen/fragments";
@@ -179,6 +180,14 @@ export class Viewer {
   private currentIsStreamed = false;
   private lastSelection: Selection | null = null;
   private activePlanes: THREE.Plane[] = [];
+
+  gumball?: any;
+  private clipRaycaster = new THREE.Raycaster();
+  private clipPointer = new THREE.Vector2();
+  activeWidgets: THREE.Mesh[] = [];
+  private selectedWidget: THREE.Mesh | null = null;
+  private gumballDragging = false;
+
   private clippingHelpersGroup = new THREE.Group();
   private clippingGizmosGroup = new THREE.Group();
   private gizmos: { proxy: THREE.Mesh; control: TransformControls }[] = [];
@@ -192,11 +201,18 @@ export class Viewer {
     sliceDepth: 1,
     boxSize: { x: 1, y: 1, z: 1 },
     showHelper: false,
-  };
+    axis: "y",
+    planePos: 0,
+    sliceMin: -1,
+    sliceMax: 1,
+    boxMin: { x: 0, y: 0, z: 0 },
+    boxMax: { x: 1, y: 1, z: 1 },
+    inverted: false,
+  } as any;
   readonly onClippingChanged = new Emitter<ClippingState>();
 
   get isDraggingGizmo(): boolean {
-    return this.gizmoDragging;
+    return this.gizmoDragging || this.gumballDragging;
   }
 
   /**
@@ -241,6 +257,7 @@ export class Viewer {
   }
 
   async init(container: HTMLElement): Promise<void> {
+    container.addEventListener("pointerdown", this.onPointerDown.bind(this), true);
     const components = new OBC.Components();
     const worlds = components.get(OBC.Worlds);
     const world = worlds.create<
@@ -1344,6 +1361,52 @@ export class Viewer {
   /**
    * Initializes default clipping plane state based on the current model bounds.
    */
+  
+  private onPointerDown(e: PointerEvent): void {
+    if (!this.clipState.enabled || !this.clipState.showHelper) return;
+    const rect = this.world.renderer!.three.domElement.getBoundingClientRect();
+    this.clipPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.clipPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this.clipRaycaster.setFromCamera(this.clipPointer, this.world.camera.three);
+    const hits = this.clipRaycaster.intersectObjects(this.activeWidgets, false);
+    if (hits.length > 0) {
+      
+      this.selectedWidget = hits[0]!.object as THREE.Mesh;
+      this.activeWidgets.forEach((w: any) => {
+         const mat = w.material as THREE.MeshBasicMaterial;
+         mat.color.setHex(w === this.selectedWidget ? 0xffaa00 : 0xf0883e);
+         mat.opacity = w === this.selectedWidget ? 0.6 : 0.2;
+      });
+      if (!this.gumball) {
+         this.gumball = new ClippingGumball({
+            camera: this.world.camera.three,
+            domElement: this.world.renderer!.three.domElement,
+            scene: this.world.scene.three,
+            onStart: () => { this.gumballDragging = true; },
+            onChange: (t, h, s) => { this.setClippingState({ transform: { position: t.position.clone(), rotation: { x: t.quaternion.x, y: t.quaternion.y, z: t.quaternion.z, w: t.quaternion.w } } } as any); },
+            onEnd: () => { this.gumballDragging = false; this.onClippingChanged.emit(this.clipState); },
+            onCancel: (t) => { this.gumballDragging = false; this.setClippingState({ transform: { position: t.position.clone(), rotation: { x: t.quaternion.x, y: t.quaternion.y, z: t.quaternion.z, w: t.quaternion.w } } } as any); this.onClippingChanged.emit(this.clipState); }
+         });
+         this.clippingGizmosGroup.add(this.gumball.object);
+      }
+      
+      const t = this.clipState.transform;
+      this.gumball.attach({
+        position: new THREE.Vector3(t.position.x, t.position.y, t.position.z),
+        quaternion: new THREE.Quaternion(t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w),
+        scale: new THREE.Vector3(1,1,1)
+      });
+    } else {
+      this.selectedWidget = null;
+      this.activeWidgets.forEach((w: any) => {
+         const mat = w.material as THREE.MeshBasicMaterial;
+         mat.color.setHex(0xf0883e);
+         mat.opacity = 0.2;
+      });
+      if (this.gumball) this.gumball.detach();
+    }
+  }
+
   private initClippingStateForModel(): void {
     const box = this.getModelBoundingBox();
     if (!box) return;
@@ -1360,7 +1423,14 @@ export class Viewer {
       sliceDepth: size.y * 0.5,
       boxSize: { x: size.x, y: size.y, z: size.z },
       showHelper: false,
-    };
+      axis: "y",
+      planePos: 0,
+      sliceMin: -1,
+      sliceMax: 1,
+      boxMin: { x: 0, y: 0, z: 0 },
+      boxMax: { x: 1, y: 1, z: 1 },
+      inverted: false,
+    } as any;
   }
 
   /**
@@ -1374,6 +1444,30 @@ export class Viewer {
    * Updates clipping configuration and applies the resulting planes to the renderer.
    */
   setClippingState(updates: Partial<ClippingState>): void {
+    const u = updates as any;
+    const cs = this.clipState as any;
+    if (u.axis !== undefined || u.inverted !== undefined || u.planePos !== undefined) {
+      const axis = u.axis ?? cs.axis;
+      const inverted = u.inverted ?? cs.inverted;
+      const planePos = u.planePos ?? cs.planePos;
+      
+      let x = 0, y = 0, z = 0;
+      let rot = { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 };
+      
+      if (axis === "x") {
+        x = planePos;
+        rot = inverted ? { x: 0, y: Math.SQRT1_2, z: 0, w: Math.SQRT1_2 } : { x: 0, y: -Math.SQRT1_2, z: 0, w: Math.SQRT1_2 };
+      } else if (axis === "y") {
+        y = planePos;
+        rot = inverted ? { x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 } : { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 };
+      } else if (axis === "z") {
+        z = planePos;
+        rot = inverted ? { x: 0, y: 1, z: 0, w: 0 } : { x: 0, y: 0, z: 0, w: 1 };
+      }
+      
+      updates.transform = { position: { x, y, z }, rotation: rot };
+    }
+
     if (updates.transform) {
       const { position, rotation } = updates.transform;
       if (!Number.isFinite(position.x) || !Number.isFinite(position.y) || !Number.isFinite(position.z)) return;
@@ -1419,7 +1513,7 @@ export class Viewer {
       }
     }
 
-    this.clipState = { ...this.clipState, ...updates };
+    this.clipState = { ...this.clipState, ...updates }; console.log("clipState after update:", this.clipState);
     this.syncClippingPlanes();
     this.onClippingChanged.emit(this.clipState);
   }
@@ -1430,20 +1524,16 @@ export class Viewer {
   private clearClippingHelpers(): void {
     while (this.clippingHelpersGroup.children.length > 0) {
       const child = this.clippingHelpersGroup.children[0] as any;
-      this.clippingHelpersGroup.remove(child);
-      child.dispose?.();
-      child.geometry?.dispose?.();
-      if (Array.isArray(child.material)) {
-        child.material.forEach((m: any) => m?.dispose?.());
-      } else {
-        child.material?.dispose?.();
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) {
+        if (Array.isArray(child.material)) child.material.forEach((m: any) => m.dispose());
+        else child.material.dispose();
       }
+      this.clippingHelpersGroup.remove(child);
     }
+    this.activeWidgets = [];
   }
 
-  /**
-   * Synchronizes active THREE.Plane instances with the renderer.
-   */
   private syncClippingPlanes(): void {
     const renderer = this.world?.renderer;
     if (!renderer) return;
@@ -1456,94 +1546,105 @@ export class Viewer {
       }
       this.activePlanes = [];
       this.world?.renderer?.update();
+      if (this.gumball) this.gumball.detach();
       return;
     }
 
     const desiredPlanes: THREE.Plane[] = [];
-    const { mode, showHelper } = this.clipState;
-    const { axis, inverted, planePos, sliceMin, sliceMax, boxMin, boxMax } = this.clipState as any;
+    const { mode, showHelper, transform, planeSize, sliceDepth, boxSize } = this.clipState;
+    
+    const pos = new THREE.Vector3(transform.position.x, transform.position.y, transform.position.z);
+    const quat = new THREE.Quaternion(transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w);
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(quat).normalize();
+    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(quat).normalize();
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(quat).normalize();
+
+    const createWidget = (center: THREE.Vector3, normal: THREE.Vector3, w: number, h: number, q: THREE.Quaternion) => {
+       const geo = new THREE.PlaneGeometry(w, h);
+       const mat = new THREE.MeshBasicMaterial({ color: 0xf0883e, side: THREE.DoubleSide, transparent: true, opacity: 0.2, depthWrite: false });
+       const mesh = new THREE.Mesh(geo, mat);
+       mesh.position.copy(center);
+       mesh.quaternion.copy(q);
+       
+       const edges = new THREE.EdgesGeometry(geo);
+       const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xf0883e }));
+       mesh.add(line);
+       
+       this.clippingHelpersGroup.add(mesh);
+       this.activeWidgets.push(mesh);
+       return mesh;
+    };
 
     if (mode === "plane") {
-      const normal = new THREE.Vector3();
-      let constant = 0;
-      if (axis === "x") {
-        if (!inverted) { normal.set(-1, 0, 0); constant = planePos; }
-        else { normal.set(1, 0, 0); constant = -planePos; }
-      } else if (axis === "y") {
-        if (!inverted) { normal.set(0, -1, 0); constant = planePos; }
-        else { normal.set(0, 1, 0); constant = -planePos; }
-      } else { // z
-        if (!inverted) { normal.set(0, 0, -1); constant = planePos; }
-        else { normal.set(0, 0, 1); constant = -planePos; }
-      }
-      const plane = new THREE.Plane(normal, constant);
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(forward, pos);
       desiredPlanes.push(plane);
 
       if (showHelper) {
-        const box = this.getModelBoundingBox();
-        const s = box ? Math.max(box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z) * 1.5 : 20;
-        this.clippingHelpersGroup.add(new THREE.PlaneHelper(plane, s, 0xf0883e));
+         createWidget(pos, forward, planeSize.x, planeSize.y, quat);
       }
     } else if (mode === "slice") {
-      const nMin = new THREE.Vector3();
-      const nMax = new THREE.Vector3();
-      if (axis === "x") {
-        nMin.set(1, 0, 0);
-        nMax.set(-1, 0, 0);
-      } else if (axis === "y") {
-        nMin.set(0, 1, 0);
-        nMax.set(0, -1, 0);
-      } else {
-        nMin.set(0, 0, 1);
-        nMax.set(0, 0, -1);
-      }
-      const minP = Math.min(sliceMin, sliceMax);
-      const maxP = Math.max(sliceMin, sliceMax);
-      const plane1 = new THREE.Plane(nMin, -minP);
-      const plane2 = new THREE.Plane(nMax, maxP);
-      desiredPlanes.push(plane1, plane2);
+      const p1 = new THREE.Plane().setFromNormalAndCoplanarPoint(forward, pos.clone().add(forward.clone().multiplyScalar(sliceDepth / 2)));
+      const p2 = new THREE.Plane().setFromNormalAndCoplanarPoint(forward.clone().negate(), pos.clone().add(forward.clone().multiplyScalar(-sliceDepth / 2)));
+      desiredPlanes.push(p1, p2);
 
       if (showHelper) {
-        const box = this.getModelBoundingBox();
-        const s = box ? Math.max(box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z) * 1.5 : 20;
-        this.clippingHelpersGroup.add(new THREE.PlaneHelper(plane1, s, 0x58a6ff));
-        this.clippingHelpersGroup.add(new THREE.PlaneHelper(plane2, s, 0xf0883e));
+         createWidget(pos.clone().add(forward.clone().multiplyScalar(sliceDepth / 2)), forward, planeSize.x, planeSize.y, quat);
+         const q2 = quat.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), Math.PI));
+         createWidget(pos.clone().add(forward.clone().multiplyScalar(-sliceDepth / 2)), forward.clone().negate(), planeSize.x, planeSize.y, q2);
       }
     } else if (mode === "box") {
-      const minX = Math.min(boxMin.x, boxMax.x);
-      const maxX = Math.max(boxMin.x, boxMax.x);
-      const minY = Math.min(boxMin.y, boxMax.y);
-      const maxY = Math.max(boxMin.y, boxMax.y);
-      const minZ = Math.min(boxMin.z, boxMax.z);
-      const maxZ = Math.max(boxMin.z, boxMax.z);
-
-      const pX1 = new THREE.Plane(new THREE.Vector3(1, 0, 0), -minX);
-      const pX2 = new THREE.Plane(new THREE.Vector3(-1, 0, 0), maxX);
-      const pY1 = new THREE.Plane(new THREE.Vector3(0, 1, 0), -minY);
-      const pY2 = new THREE.Plane(new THREE.Vector3(0, -1, 0), maxY);
-      const pZ1 = new THREE.Plane(new THREE.Vector3(0, 0, 1), -minZ);
-      const pZ2 = new THREE.Plane(new THREE.Vector3(0, 0, -1), maxZ);
-      desiredPlanes.push(pX1, pX2, pY1, pY2, pZ1, pZ2);
+      const hw = boxSize.x / 2;
+      const hh = boxSize.y / 2;
+      const hd = boxSize.z / 2;
+      
+      const pZ1 = new THREE.Plane().setFromNormalAndCoplanarPoint(forward, pos.clone().add(forward.clone().multiplyScalar(hd)));
+      const pZ2 = new THREE.Plane().setFromNormalAndCoplanarPoint(forward.clone().negate(), pos.clone().add(forward.clone().multiplyScalar(-hd)));
+      const pX1 = new THREE.Plane().setFromNormalAndCoplanarPoint(right, pos.clone().add(right.clone().multiplyScalar(hw)));
+      const pX2 = new THREE.Plane().setFromNormalAndCoplanarPoint(right.clone().negate(), pos.clone().add(right.clone().multiplyScalar(-hw)));
+      const pY1 = new THREE.Plane().setFromNormalAndCoplanarPoint(up, pos.clone().add(up.clone().multiplyScalar(hh)));
+      const pY2 = new THREE.Plane().setFromNormalAndCoplanarPoint(up.clone().negate(), pos.clone().add(up.clone().multiplyScalar(-hh)));
+      
+      desiredPlanes.push(pZ1, pZ2, pX1, pX2, pY1, pY2);
 
       if (showHelper) {
-        const b3 = new THREE.Box3(
-          new THREE.Vector3(minX, minY, minZ),
-          new THREE.Vector3(maxX, maxY, maxZ),
-        );
-        this.clippingHelpersGroup.add(new THREE.Box3Helper(b3, new THREE.Color(0xf0883e)));
+         createWidget(pos.clone().add(forward.clone().multiplyScalar(hd)), forward, boxSize.x, boxSize.y, quat);
+         const q2 = quat.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), Math.PI));
+         createWidget(pos.clone().add(forward.clone().multiplyScalar(-hd)), forward.clone().negate(), boxSize.x, boxSize.y, q2);
+         
+         const qX1 = quat.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), Math.PI/2));
+         createWidget(pos.clone().add(right.clone().multiplyScalar(hw)), right, boxSize.z, boxSize.y, qX1);
+         const qX2 = quat.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), -Math.PI/2));
+         createWidget(pos.clone().add(right.clone().multiplyScalar(-hw)), right.clone().negate(), boxSize.z, boxSize.y, qX2);
+         
+         const qY1 = quat.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), -Math.PI/2));
+         createWidget(pos.clone().add(up.clone().multiplyScalar(hh)), up, boxSize.x, boxSize.z, qY1);
+         const qY2 = quat.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), Math.PI/2));
+         createWidget(pos.clone().add(up.clone().multiplyScalar(-hh)), up.clone().negate(), boxSize.x, boxSize.z, qY2);
       }
     }
 
-    for (const p of this.activePlanes) {
+    const planesToAdd = desiredPlanes.filter(dp => !this.activePlanes.some(ap => ap.normal.equals(dp.normal) && Math.abs(ap.constant - dp.constant) < 1e-6));
+    const planesToRemove = this.activePlanes.filter(ap => !desiredPlanes.some(dp => dp.normal.equals(ap.normal) && Math.abs(dp.constant - ap.constant) < 1e-6));
+
+    for (const p of planesToRemove) {
       renderer.setPlane(false, p);
     }
-    this.activePlanes = desiredPlanes;
-    for (const p of this.activePlanes) {
+    for (const p of planesToAdd) {
       renderer.setPlane(true, p);
     }
 
+    this.activePlanes = desiredPlanes;
+    
+    if (this.selectedWidget && this.activeWidgets.includes(this.selectedWidget)) {
+        const mat = this.selectedWidget.material as THREE.MeshBasicMaterial;
+        mat.color.setHex(0xffaa00);
+        mat.opacity = 0.6;
+    } else {
+        this.selectedWidget = null;
+        if (this.gumball) this.gumball.detach();
+    }
+
     this.world?.renderer?.update();
-    this.syncGizmos();
   }
 
   private syncGizmos(): void {
@@ -1672,7 +1773,7 @@ export class Viewer {
       enabled: true,
       mode: "plane",
       transform: {
-        position: { x: 0, y: height, z: 0 },
+        position: { x: 0, y: height as number, z: 0 },
         rotation: { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 }
       },
     });

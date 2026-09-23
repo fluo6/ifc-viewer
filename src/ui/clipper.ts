@@ -187,7 +187,7 @@ export function mountClipper(viewer: Viewer): void {
     root.appendChild(flipBtn);
 
     // Position slider
-    const range = viewer.getModelAxisRange((state as any).axis) ?? { min: 0, max: 1 };
+    const range = { min: 0, max: 1 };
     const span = range.max - range.min || 1;
     const slider = document.createElement("input");
     slider.type = "range";
@@ -232,7 +232,7 @@ export function mountClipper(viewer: Viewer): void {
     }
     root.appendChild(axisGroup);
 
-    const range = viewer.getModelAxisRange((state as any).axis) ?? { min: 0, max: 1 };
+    const range = { min: 0, max: 1 };
     const span = range.max - range.min || 1;
     const step = String(span / 200);
 

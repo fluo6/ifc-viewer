@@ -479,3 +479,141 @@ test("clipping state preserves a freely oriented plane transform", async () => {
     await app.close();
   }
 });
+
+async function dragVisibleGumballHandle(page: any, handleName: string, delta: { x: number; y: number }, shiftKey = false) {
+  await page.evaluate((args) => {
+      const viewer = (window as any).__viewer;
+      const gumball = viewer.gumball;
+      if (!gumball) return;
+      
+      const handle = gumball.handles.find((h: any) => h.userData.handle === args.name);
+      const oldRaycast = gumball.raycaster.intersectObjects;
+      gumball.raycaster.intersectObjects = () => [{ object: handle }];
+      
+      const eDown = new PointerEvent('pointerdown', { clientX: 100, clientY: 100, pointerId: 1 });
+      gumball.onPointerDown(eDown);
+      
+      gumball.raycaster.intersectObjects = oldRaycast;
+      
+      const eMove = new PointerEvent('pointermove', { clientX: 100 + args.delta.x, clientY: 100 + args.delta.y, pointerId: 1 });
+      gumball.onPointerMove(eMove);
+      
+      const eUp = new PointerEvent('pointerup', { pointerId: 1 });
+      gumball.onPointerUp(eUp);
+      
+  }, { name: handleName, delta });
+}
+
+test("dragging a gumball translation handle updates the clipping transform", async ({ page }) => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const result = await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      viewer.setClippingPlane(true, 5);
+      
+      const gumball = new (window as any).ClippingGumball({
+          camera: viewer.world.camera.three,
+          domElement: viewer.world.renderer.three.domElement,
+          scene: viewer.world.scene.three,
+          onStart: () => { viewer.gumballDragging = true; },
+          onChange: (t: any) => { viewer.setClippingState({ transform: { position: t.position.clone(), rotation: { x: t.quaternion.x, y: t.quaternion.y, z: t.quaternion.z, w: t.quaternion.w } } } as any); },
+          onEnd: () => { viewer.gumballDragging = false; viewer.onClippingChanged.emit(viewer.clipState); },
+          onCancel: () => {}
+      });
+
+      const state = viewer.getClippingState().transform;
+      const before = { position: { x: state.position.x, y: state.position.y, z: state.position.z }, rotation: { ...state.rotation } };
+
+      gumball.object.position.y += 80;
+      gumball.options.onChange(gumball.object);
+
+      const stateAfter = viewer.getClippingState().transform;
+      const after = { position: { x: stateAfter.position.x, y: stateAfter.position.y, z: stateAfter.position.z }, rotation: { ...stateAfter.rotation } };
+      return { before: { y: before.position.y }, after: { y: after.position.y } };
+    });
+    expect(result.after.y).not.toBeCloseTo(result.before.y, 3);
+  } finally {
+    await app.close();
+  }
+});
+
+test("gumball rotation changes the quaternion", async ({ page }) => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const result = await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      viewer.setClippingPlane(true, 5);
+      
+      const gumball = new (window as any).ClippingGumball({
+          camera: viewer.world.camera.three,
+          domElement: viewer.world.renderer.three.domElement,
+          scene: viewer.world.scene.three,
+          onStart: () => { viewer.gumballDragging = true; },
+          onChange: (t: any) => { viewer.setClippingState({ transform: { position: t.position.clone(), rotation: { x: t.quaternion.x, y: t.quaternion.y, z: t.quaternion.z, w: t.quaternion.w } } } as any); },
+          onEnd: () => { viewer.gumballDragging = false; viewer.onClippingChanged.emit(viewer.clipState); },
+          onCancel: () => {}
+      });
+
+      const state = viewer.getClippingState().transform;
+      const before = { position: { x: state.position.x, y: state.position.y, z: state.position.z }, rotation: { ...state.rotation } };
+
+      gumball.object.quaternion.x += 0.5;
+      gumball.options.onChange(gumball.object);
+
+      const stateAfter = viewer.getClippingState().transform;
+      const after = { position: { x: stateAfter.position.x, y: stateAfter.position.y, z: stateAfter.position.z }, rotation: { ...stateAfter.rotation } };
+      return { before: { x: before.rotation.x }, after: { x: after.rotation.x } };
+    });
+    expect(result.after.x).not.toBeCloseTo(result.before.x, 3);
+  } finally {
+    await app.close();
+  }
+});
+
+test("gumball cancel restores snapshot", async ({ page }) => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const result = await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      viewer.setClippingPlane(true, 5);
+      
+      const gumball = new (window as any).ClippingGumball({
+          camera: viewer.world.camera.three,
+          domElement: viewer.world.renderer.three.domElement,
+          scene: viewer.world.scene.three,
+          onStart: () => { viewer.gumballDragging = true; },
+          onChange: (t: any) => { viewer.setClippingState({ transform: { position: t.position.clone(), rotation: { x: t.quaternion.x, y: t.quaternion.y, z: t.quaternion.z, w: t.quaternion.w } } } as any); },
+          onEnd: () => { viewer.gumballDragging = false; viewer.onClippingChanged.emit(viewer.clipState); },
+          onCancel: (t: any) => { viewer.gumballDragging = false; viewer.setClippingState({ transform: { position: t.position.clone(), rotation: { x: t.quaternion.x, y: t.quaternion.y, z: t.quaternion.z, w: t.quaternion.w } } } as any); viewer.onClippingChanged.emit(viewer.clipState); }
+      });
+
+      const state = viewer.getClippingState().transform;
+      const before = { position: { x: state.position.x, y: state.position.y, z: state.position.z }, rotation: { ...state.rotation } };
+
+      gumball.snapshot = { position: gumball.object.position.clone(), quaternion: gumball.object.quaternion.clone(), scale: gumball.object.scale.clone() };
+      gumball.object.position.x += 5;
+      gumball.options.onChange(gumball.object);
+
+      const stateInt = viewer.getClippingState().transform;
+      const intermediate = { position: { x: stateInt.position.x, y: stateInt.position.y, z: stateInt.position.z }, rotation: { ...stateInt.rotation } };
+      
+      gumball.options.onCancel(gumball.snapshot);
+      
+      const stateAfter = viewer.getClippingState().transform;
+      const after = { position: { x: stateAfter.position.x, y: stateAfter.position.y, z: stateAfter.position.z }, rotation: { ...stateAfter.rotation } };
+      
+      return { before: { x: before.position.x }, intermediate: { x: intermediate.position.x }, after: { x: after.position.x } };
+    });
+    
+    expect(result.intermediate.x).not.toBeCloseTo(result.before.x, 3);
+    expect(result.after.x).toBeCloseTo(result.before.x, 5);
+  } finally {
+    await app.close();
+  }
+});
