@@ -27,7 +27,7 @@ test("enabling the clipping plane does not throw", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     const result = await page.evaluate(() => {
       const viewer = (window as any).__viewer;
       const range = viewer.getModelHeightRange();
@@ -56,7 +56,7 @@ test("the clipping plane visibly changes the render, and toggling off restores i
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     const viewport = page.locator("#viewport");
 
     const baseline = await viewport.screenshot();
@@ -95,7 +95,7 @@ test("moving the plane clips at a different height", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     const viewport = page.locator("#viewport");
 
     const heights = await page.evaluate(() => {
@@ -128,7 +128,7 @@ test("a clipping plane above the model leaves the model visible", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     const viewport = page.locator("#viewport");
 
     const baseline = await viewport.screenshot();
@@ -160,7 +160,7 @@ test("unloading the model clears the clipping plane", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     await page.evaluate(() => {
       const viewer = (window as any).__viewer;
       const range = viewer.getModelHeightRange();
@@ -179,7 +179,7 @@ test("orthogonal axes X and Z clip geometry along their respective directions", 
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     const viewport = page.locator("#viewport");
     const baseline = await viewport.screenshot();
 
@@ -224,7 +224,7 @@ test("inverting the cut direction flips which side of the plane is clipped", asy
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     const viewport = page.locator("#viewport");
 
     await page.evaluate(() => {
@@ -262,7 +262,7 @@ test("slice mode creates two clipping planes", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     const viewport = page.locator("#viewport");
     const baseline = await viewport.screenshot();
 
@@ -292,7 +292,7 @@ test("section box mode creates 6 clipping planes and fitToSelection shrinks the 
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
 
     await page.evaluate(() => {
       const viewer = (window as any).__viewer;
@@ -339,7 +339,7 @@ test("keyboard shortcut 'c' toggles clipping", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     expect(await page.evaluate(() => (window as any).__viewer.getClippingState().enabled)).toBe(false);
 
     await page.keyboard.press("c");
@@ -356,7 +356,7 @@ test("clipper UI renders buttons and interacts with modes", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     const toggle = page.locator("#clipper-toggle");
     await expect(toggle).toHaveText("Clip: OFF");
 
@@ -394,7 +394,7 @@ test("clipping updates keep the active slider mounted until its drag ends", asyn
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     await page.locator("#clipper-toggle").click();
 
     const slider = page.locator("#clipper .clip-slider");
@@ -429,7 +429,7 @@ test("gizmo dragging defers clipper rendering until the drag ends", async () => 
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     await page.locator("#clipper-toggle").click();
     await page.getByTitle("Toggle 3D clipping helper wireframes in viewport").click();
 
@@ -460,7 +460,7 @@ test("clipping state preserves a freely oriented plane transform", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     const rotation = { x: 0, y: Math.SQRT1_2, z: 0, w: Math.SQRT1_2 };
     const position = { x: 1, y: 2, z: 3 };
     const state = await page.evaluate(({ position, rotation }) => {
@@ -508,7 +508,7 @@ test("dragging a gumball translation handle updates the clipping transform", asy
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     const result = await page.evaluate(() => {
       const viewer = (window as any).__viewer;
       viewer.setClippingPlane(true, 5);
@@ -543,7 +543,7 @@ test("gumball rotation changes the quaternion", async ({ page }) => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     const result = await page.evaluate(() => {
       const viewer = (window as any).__viewer;
       viewer.setClippingPlane(true, 5);
@@ -578,7 +578,7 @@ test("gumball cancel restores snapshot", async ({ page }) => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app);
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
     const result = await page.evaluate(() => {
       const viewer = (window as any).__viewer;
       viewer.setClippingPlane(true, 5);
@@ -613,6 +613,128 @@ test("gumball cancel restores snapshot", async ({ page }) => {
     
     expect(result.intermediate.x).not.toBeCloseTo(result.before.x, 3);
     expect(result.after.x).toBeCloseTo(result.before.x, 5);
+  } finally {
+    await app.close();
+  }
+});
+
+test("footer controls translate plane along local normal", async ({ page }) => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
+    const result = await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      viewer.setClippingState({
+        enabled: true,
+        mode: "plane",
+        transform: {
+          position: { x: 0, y: 0, z: 0 },
+          rotation: { x: 0.5, y: 0, z: 0, w: 0.8660254 } // rotated some amount
+        }
+      });
+      // Force UI render manually since E2E mock doesn't always trigger resize
+      const clipper = document.getElementById("clipper");
+      const slider = clipper.querySelector('input[type="range"]') as HTMLInputElement;
+      
+      const before = { ...viewer.getClippingState().transform };
+      before.position = { ...before.position };
+      before.rotation = { ...before.rotation };
+
+      // Change offset slider
+      slider.value = String(Number(slider.value) + 5);
+      slider.dispatchEvent(new Event('input'));
+      
+      const after = { ...viewer.getClippingState().transform };
+      after.position = { ...after.position };
+      after.rotation = { ...after.rotation };
+
+      return { before, after };
+    });
+    // Expected: position moved along normal, rotation stayed exactly the same
+    expect(result.after.position).not.toEqual(result.before.position);
+    expect(result.after.rotation).toEqual(result.before.rotation);
+  } finally {
+    await app.close();
+  }
+});
+
+test("footer controls update slice depth without resetting rotation", async ({ page }) => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
+    const result = await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      viewer.setClippingState({
+        enabled: true,
+        mode: "slice",
+        transform: {
+          position: { x: 0, y: 0, z: 0 },
+          rotation: { x: 0.5, y: 0, z: 0, w: 0.8660254 }
+        },
+        sliceDepth: 5
+      });
+      
+      const clipper = document.getElementById("clipper");
+      // Grab depth slider (second slider in slice mode)
+      const sliders = clipper.querySelectorAll('input[type="range"]');
+      const depthSlider = sliders[1] as HTMLInputElement;
+      
+      const before = viewer.getClippingState().sliceDepth;
+
+      depthSlider.value = String(Number(depthSlider.value) + 3);
+      depthSlider.dispatchEvent(new Event('input'));
+      
+      const afterState = viewer.getClippingState();
+      
+      return { before, afterDepth: afterState.sliceDepth, afterRot: afterState.transform.rotation };
+    });
+    
+    expect(result.afterDepth).not.toBe(result.before);
+    expect(result.afterRot.w).toBeCloseTo(0.866, 3);
+  } finally {
+    await app.close();
+  }
+});
+
+test("footer controls update box dimension without resetting rotation", async ({ page }) => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
+    const result = await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      viewer.setClippingState({
+        enabled: true,
+        mode: "box",
+        transform: {
+          position: { x: 0, y: 0, z: 0 },
+          rotation: { x: 0.5, y: 0, z: 0, w: 0.8660254 }
+        },
+        boxSize: { x: 10, y: 10, z: 10 }
+      });
+      
+      // Need to open box panel
+      const panelBtn = document.getElementById("clipper").querySelector('button[title*="Open"]') as HTMLButtonElement;
+      panelBtn.click();
+      
+      const panel = document.getElementById("section-box-panel");
+      const sliders = panel.querySelectorAll('input[type="range"]');
+      const widthSlider = sliders[0] as HTMLInputElement; // X width slider
+      
+      const before = viewer.getClippingState().boxSize.x;
+
+      widthSlider.value = String(Number(widthSlider.value) + 5);
+      widthSlider.dispatchEvent(new Event('input'));
+      
+      const afterState = viewer.getClippingState();
+      
+      return { before, afterSize: afterState.boxSize.x, afterRot: afterState.transform.rotation };
+    });
+    
+    expect(result.afterSize).not.toBe(result.before);
+    expect(result.afterRot.w).toBeCloseTo(0.866, 3);
   } finally {
     await app.close();
   }

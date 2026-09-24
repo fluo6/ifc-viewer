@@ -38,7 +38,7 @@ export function mountClipper(viewer: Viewer): void {
       isSliderInteraction = true;
     });
     slider.addEventListener("keyup", finishSliderInteraction);
-    slider.addEventListener("change", finishSliderInteraction);
+    slider.addEventListener("input", finishSliderInteraction);
     slider.addEventListener("blur", finishSliderInteraction);
   }
 
@@ -157,56 +157,104 @@ export function mountClipper(viewer: Viewer): void {
     root.appendChild(helperBtn);
   }
 
+
+  // Helper math to avoid Three.js dependency
+  function getNormal(rot: {x:number, y:number, z:number, w:number}) {
+    // Rotates (0, 0, -1) by quaternion
+    const x = rot.x, y = rot.y, z = rot.z, w = rot.w;
+    return {
+      x: -2 * (x * z + y * w),
+      y: -2 * (y * z - x * w),
+      z: -(1 - 2 * (x * x + y * y))
+    };
+  }
+
+  function getProjectedRange(rot: {x:number, y:number, z:number, w:number}) {
+    const bounds = viewer.getModelBoundingBox();
+    if (!bounds) return { min: -10, max: 10 };
+    const n = getNormal(rot);
+    const corners = [
+      {x: bounds.min.x, y: bounds.min.y, z: bounds.min.z},
+      {x: bounds.max.x, y: bounds.min.y, z: bounds.min.z},
+      {x: bounds.min.x, y: bounds.max.y, z: bounds.min.z},
+      {x: bounds.max.x, y: bounds.max.y, z: bounds.min.z},
+      {x: bounds.min.x, y: bounds.min.y, z: bounds.max.z},
+      {x: bounds.max.x, y: bounds.min.y, z: bounds.max.z},
+      {x: bounds.min.x, y: bounds.max.y, z: bounds.max.z},
+      {x: bounds.max.x, y: bounds.max.y, z: bounds.max.z},
+    ];
+    let min = Infinity, max = -Infinity;
+    for (const c of corners) {
+      const dot = c.x * n.x + c.y * n.y + c.z * n.z;
+      if (dot < min) min = dot;
+      if (dot > max) max = dot;
+    }
+    return { min, max };
+  }
+
   function renderPlaneControls(state: ReturnType<typeof viewer.getClippingState>) {
-    // Axis Buttons: X, Y, Z
     const axisGroup = document.createElement("div");
     axisGroup.className = "btn-group mini-group";
-    const axes: ClipAxis[] = ["x", "y", "z"];
-    for (const ax of axes) {
+    
+    // X, Y, Z presets
+    const presets = [
+      { id: "X", rot: { x: 0, y: -Math.SQRT1_2, z: 0, w: Math.SQRT1_2 } },
+      { id: "Y", rot: { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 } },
+      { id: "Z", rot: { x: 0, y: 0, z: 0, w: 1 } }
+    ];
+    
+    for (const p of presets) {
       const btn = document.createElement("button");
-      btn.className = `mini ${(state as any).axis === ax ? "active" : ""}`;
-      btn.textContent = ax.toUpperCase();
-      btn.title = `Cut along ${ax.toUpperCase()} axis`;
+      btn.className = "mini";
+      btn.textContent = p.id;
       btn.addEventListener("click", () => {
-        if ((state as any).axis !== ax) {
-          viewer.setClippingState({ axis: ax } as any);
-        }
+        viewer.setClippingState({ transform: { position: state.transform.position, rotation: p.rot } } as any);
       });
       axisGroup.appendChild(btn);
     }
     root.appendChild(axisGroup);
 
-    // Flip button
+    // Flip
     const flipBtn = document.createElement("button");
-    flipBtn.className = `mini ${(state as any).inverted ? "active" : ""}`;
+    flipBtn.className = "mini";
     flipBtn.textContent = "⇅ Flip";
-    flipBtn.title = "Invert cutting normal direction";
     flipBtn.addEventListener("click", () => {
-      viewer.setClippingState({ inverted: !(state as any).inverted } as any);
+      const r = state.transform.rotation;
+      // 180 deg around local X: w'= -x, x'= w, y'= -z, z'= y
+      const flipped = { x: r.w, y: -r.z, z: r.y, w: -r.x };
+      viewer.setClippingState({ transform: { position: state.transform.position, rotation: flipped } } as any);
     });
     root.appendChild(flipBtn);
 
-    // Position slider
-    const range = { min: 0, max: 1 };
+    const range = getProjectedRange(state.transform.rotation);
+    const n = getNormal(state.transform.rotation);
+    const currentOffset = state.transform.position.x * n.x + state.transform.position.y * n.y + state.transform.position.z * n.z;
+
     const span = range.max - range.min || 1;
+    const step = String(span / 200);
+
+    const offsetLbl = document.createElement("label");
+    offsetLbl.textContent = "Offset";
+    root.appendChild(offsetLbl);
+
     const slider = document.createElement("input");
     slider.type = "range";
     slider.className = "clip-slider";
     slider.min = String(range.min);
     slider.max = String(range.max);
-    slider.step = String(span / 200);
-    slider.value = String((state as any).planePos);
-    slider.style.width = "100px";
+    slider.step = step;
+    slider.value = String(currentOffset);
     trackSliderInteraction(slider);
 
     const valSpan = document.createElement("span");
     valSpan.className = "clip-val";
-    valSpan.textContent = `${(state as any).axis.toUpperCase()}: ${(state as any).planePos.toFixed(2)}m`;
+    valSpan.textContent = `${currentOffset.toFixed(2)}m`;
 
     slider.addEventListener("input", () => {
-      const v = parseFloat(slider.value);
-      valSpan.textContent = `${(state as any).axis.toUpperCase()}: ${v.toFixed(2)}m`;
-      viewer.setClippingState({ planePos: v } as any);
+      const val = parseFloat(slider.value);
+      valSpan.textContent = `${val.toFixed(2)}m`;
+      const p = { x: n.x * val, y: n.y * val, z: n.z * val };
+      viewer.setClippingState({ transform: { position: p, rotation: state.transform.rotation } } as any);
     });
 
     root.appendChild(slider);
@@ -214,89 +262,39 @@ export function mountClipper(viewer: Viewer): void {
   }
 
   function renderSliceControls(state: ReturnType<typeof viewer.getClippingState>) {
-    // Axis Buttons: X, Y, Z
-    const axisGroup = document.createElement("div");
-    axisGroup.className = "btn-group mini-group";
-    const axes: ClipAxis[] = ["x", "y", "z"];
-    for (const ax of axes) {
-      const btn = document.createElement("button");
-      btn.className = `mini ${(state as any).axis === ax ? "active" : ""}`;
-      btn.textContent = ax.toUpperCase();
-      btn.title = `Slice along ${ax.toUpperCase()} axis`;
-      btn.addEventListener("click", () => {
-        if ((state as any).axis !== ax) {
-          viewer.setClippingState({ axis: ax } as any);
-        }
-      });
-      axisGroup.appendChild(btn);
-    }
-    root.appendChild(axisGroup);
+    renderPlaneControls(state);
 
-    const range = { min: 0, max: 1 };
+    const depthLbl = document.createElement("label");
+    depthLbl.textContent = "Depth";
+    root.appendChild(depthLbl);
+
+    const range = getProjectedRange(state.transform.rotation);
     const span = range.max - range.min || 1;
-    const step = String(span / 200);
 
-    // Min slider
-    const minLabel = document.createElement("span");
-    minLabel.className = "clip-label";
-    minLabel.textContent = "Min";
-    root.appendChild(minLabel);
+    const depthSlider = document.createElement("input");
+    depthSlider.type = "range";
+    depthSlider.className = "clip-slider clip-slider-max";
+    depthSlider.min = "0.01";
+    depthSlider.max = String(span);
+    depthSlider.step = String(span / 200);
+    depthSlider.value = String(state.sliceDepth || span / 2);
+    trackSliderInteraction(depthSlider);
 
-    const minSlider = document.createElement("input");
-    minSlider.type = "range";
-    minSlider.className = "clip-slider clip-slider-min";
-    minSlider.min = String(range.min);
-    minSlider.max = String(range.max);
-    minSlider.step = step;
-    minSlider.value = String((state as any).sliceMin);
-    minSlider.style.width = "70px";
-    trackSliderInteraction(minSlider);
+    const valSpan = document.createElement("span");
+    valSpan.className = "clip-val";
+    valSpan.textContent = `${parseFloat(depthSlider.value).toFixed(2)}m`;
 
-    const minVal = document.createElement("span");
-    minVal.className = "clip-val";
-    minVal.textContent = `${(state as any).sliceMin.toFixed(2)}m`;
-
-    minSlider.addEventListener("input", () => {
-      const v = parseFloat(minSlider.value);
-      minVal.textContent = `${v.toFixed(2)}m`;
-      viewer.setClippingState({ sliceMin: v } as any);
+    depthSlider.addEventListener("input", () => {
+      const val = parseFloat(depthSlider.value);
+      valSpan.textContent = `${val.toFixed(2)}m`;
+      viewer.setClippingState({ sliceDepth: val } as any);
     });
 
-    root.appendChild(minSlider);
-    root.appendChild(minVal);
-
-    // Max slider
-    const maxLabel = document.createElement("span");
-    maxLabel.className = "clip-label";
-    maxLabel.textContent = "Max";
-    root.appendChild(maxLabel);
-
-    const maxSlider = document.createElement("input");
-    maxSlider.type = "range";
-    maxSlider.className = "clip-slider clip-slider-max";
-    maxSlider.min = String(range.min);
-    maxSlider.max = String(range.max);
-    maxSlider.step = step;
-    maxSlider.value = String((state as any).sliceMax);
-    maxSlider.style.width = "70px";
-    trackSliderInteraction(maxSlider);
-
-    const maxVal = document.createElement("span");
-    maxVal.className = "clip-val";
-    maxVal.textContent = `${(state as any).sliceMax.toFixed(2)}m`;
-
-    maxSlider.addEventListener("input", () => {
-      const v = parseFloat(maxSlider.value);
-      maxVal.textContent = `${v.toFixed(2)}m`;
-      viewer.setClippingState({ sliceMax: v } as any);
-    });
-
-    root.appendChild(maxSlider);
-    root.appendChild(maxVal);
+    root.appendChild(depthSlider);
+    root.appendChild(valSpan);
   }
 
   function renderBoxControls(state: ReturnType<typeof viewer.getClippingState>) {
-    // Popover toggle button
     const panelBtn = document.createElement("button");
     panelBtn.className = `mini ${boxPanelOpen ? "active" : ""}`;
     panelBtn.textContent = `Box Controls ${boxPanelOpen ? "▴" : "▾"}`;
@@ -304,45 +302,33 @@ export function mountClipper(viewer: Viewer): void {
     panelBtn.addEventListener("click", () => {
       boxPanelOpen = !boxPanelOpen;
       panelBtn.textContent = `Box Controls ${boxPanelOpen ? "▴" : "▾"}`;
+    panelBtn.title = "Open 3D Section Box sliders panel";
       panelBtn.classList.toggle("active", boxPanelOpen);
-      if (boxPanelOpen) {
-        renderBoxPanel();
-      } else {
-        removeBoxPanel();
-      }
+      if (boxPanelOpen) renderBoxPanel();
+      else removeBoxPanel();
     });
     root.appendChild(panelBtn);
 
-    // Fit to selection button
     const fitBtn = document.createElement("button");
     fitBtn.className = "mini box-fit-btn";
     fitBtn.textContent = "Fit Selection";
-    fitBtn.title = "Fit Section Box tightly around the selected element";
     fitBtn.disabled = !viewer.getSelection();
     fitBtn.addEventListener("click", async () => {
       const ok = await viewer.fitSectionBoxToSelection(0.4);
-      if (ok && boxPanelOpen) {
-        renderBoxPanel();
-      }
+      if (ok && boxPanelOpen) renderBoxPanel();
     });
     root.appendChild(fitBtn);
 
-    // Reset box button
     const resetBtn = document.createElement("button");
     resetBtn.className = "mini box-reset-btn";
     resetBtn.textContent = "Reset Box";
-    resetBtn.title = "Reset Section Box to full model extents";
     resetBtn.addEventListener("click", () => {
       viewer.resetSectionBox();
-      if (boxPanelOpen) {
-        renderBoxPanel();
-      }
+      if (boxPanelOpen) renderBoxPanel();
     });
     root.appendChild(resetBtn);
 
-    if (boxPanelOpen) {
-      renderBoxPanel();
-    }
+    if (boxPanelOpen) renderBoxPanel();
   }
 
   function renderBoxPanel() {
@@ -352,9 +338,6 @@ export function mountClipper(viewer: Viewer): void {
       return;
     }
 
-    const bounds = viewer.getModelBoundingBox();
-    if (!bounds) return;
-
     if (!boxPanel) {
       boxPanel = document.createElement("div");
       boxPanel.id = "section-box-panel";
@@ -362,7 +345,6 @@ export function mountClipper(viewer: Viewer): void {
     }
     boxPanel.innerHTML = "";
 
-    // Header
     const header = document.createElement("div");
     header.className = "box-header";
     header.innerHTML = `<span><strong>Section Box</strong> (3D Cut)</span>`;
@@ -370,7 +352,6 @@ export function mountClipper(viewer: Viewer): void {
     const closeBtn = document.createElement("button");
     closeBtn.className = "mini box-close-btn";
     closeBtn.innerHTML = "&times;";
-    closeBtn.title = "Close panel";
     closeBtn.addEventListener("click", () => {
       boxPanelOpen = false;
       removeBoxPanel();
@@ -379,135 +360,48 @@ export function mountClipper(viewer: Viewer): void {
     header.appendChild(closeBtn);
     boxPanel.appendChild(header);
 
-    // Axis rows: X, Y, Z
-    const axisConfigs: {
-      axis: ClipAxis;
-      minKey: "x" | "y" | "z";
-      modelMin: number;
-      modelMax: number;
-      curMin: number;
-      curMax: number;
-    }[] = [
-      {
-        axis: "x",
-        minKey: "x",
-        modelMin: bounds.min.x,
-        modelMax: bounds.max.x,
-        curMin: (state as any).boxMin.x,
-        curMax: (state as any).boxMax.x,
-      },
-      {
-        axis: "y",
-        minKey: "y",
-        modelMin: bounds.min.y,
-        modelMax: bounds.max.y,
-        curMin: (state as any).boxMin.y,
-        curMax: (state as any).boxMax.y,
-      },
-      {
-        axis: "z",
-        minKey: "z",
-        modelMin: bounds.min.z,
-        modelMax: bounds.max.z,
-        curMin: (state as any).boxMin.z,
-        curMax: (state as any).boxMax.z,
-      },
+    const dims = [
+      { id: "X", key: "x" as const },
+      { id: "Y", key: "y" as const },
+      { id: "Z", key: "z" as const }
     ];
 
-    for (const cfg of axisConfigs) {
+    const bounds = viewer.getModelBoundingBox();
+    const span = bounds ? Math.max(bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y, bounds.max.z - bounds.min.z) : 10;
+    const step = String(span / 200);
+
+    for (const d of dims) {
       const row = document.createElement("div");
       row.className = "box-row";
 
       const axisTag = document.createElement("span");
       axisTag.className = "box-axis";
-      axisTag.textContent = cfg.axis.toUpperCase();
+      axisTag.textContent = d.id;
       row.appendChild(axisTag);
 
-      const span = cfg.modelMax - cfg.modelMin || 1;
-      const step = String(span / 200);
+      const valSpan = document.createElement("span");
+      valSpan.className = "clip-val";
+      valSpan.textContent = `${(state.boxSize[d.key] || span).toFixed(2)}m`;
 
-      // Min slider
-      const minLbl = document.createElement("label");
-      minLbl.textContent = "Min";
-      row.appendChild(minLbl);
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.className = "box-slider";
+      slider.min = "0.01";
+      slider.max = String(span * 2);
+      slider.step = step;
+      slider.value = String(state.boxSize[d.key] || span);
+      trackSliderInteraction(slider);
 
-      const minSlider = document.createElement("input");
-      minSlider.type = "range";
-      minSlider.className = "box-slider";
-      minSlider.min = String(cfg.modelMin);
-      minSlider.max = String(cfg.modelMax);
-      minSlider.step = step;
-      minSlider.value = String(cfg.curMin);
-      trackSliderInteraction(minSlider);
-
-      const minVal = document.createElement("span");
-      minVal.className = "clip-val";
-      minVal.textContent = `${cfg.curMin.toFixed(2)}m`;
-
-      minSlider.addEventListener("input", () => {
-        const val = parseFloat(minSlider.value);
-        minVal.textContent = `${val.toFixed(2)}m`;
-        const updatedMin = { ...(viewer.getClippingState() as any).boxMin, [cfg.minKey]: val };
-        viewer.setClippingState({ boxMin: updatedMin } as any);
+      slider.addEventListener("input", () => {
+        const val = parseFloat(slider.value);
+        valSpan.textContent = `${val.toFixed(2)}m`;
+        const updated = { ...state.boxSize, [d.key]: val };
+        viewer.setClippingState({ boxSize: updated } as any);
       });
 
-      row.appendChild(minSlider);
-      row.appendChild(minVal);
-
-      // Max slider
-      const maxLbl = document.createElement("label");
-      maxLbl.textContent = "Max";
-      row.appendChild(maxLbl);
-
-      const maxSlider = document.createElement("input");
-      maxSlider.type = "range";
-      maxSlider.className = "box-slider";
-      maxSlider.min = String(cfg.modelMin);
-      maxSlider.max = String(cfg.modelMax);
-      maxSlider.step = step;
-      maxSlider.value = String(cfg.curMax);
-      trackSliderInteraction(maxSlider);
-
-      const maxVal = document.createElement("span");
-      maxVal.className = "clip-val";
-      maxVal.textContent = `${cfg.curMax.toFixed(2)}m`;
-
-      maxSlider.addEventListener("input", () => {
-        const val = parseFloat(maxSlider.value);
-        maxVal.textContent = `${val.toFixed(2)}m`;
-        const updatedMax = { ...(viewer.getClippingState() as any).boxMax, [cfg.minKey]: val };
-        viewer.setClippingState({ boxMax: updatedMax } as any);
-      });
-
-      row.appendChild(maxSlider);
-      row.appendChild(maxVal);
-
+      row.appendChild(slider);
+      row.appendChild(valSpan);
       boxPanel.appendChild(row);
     }
-
-    // Actions in panel
-    const actions = document.createElement("div");
-    actions.className = "box-actions";
-
-    const fitBtn = document.createElement("button");
-    fitBtn.className = "mini popover-fit-btn";
-    fitBtn.textContent = "Fit to Selection";
-    fitBtn.disabled = !viewer.getSelection();
-    fitBtn.addEventListener("click", async () => {
-      const ok = await viewer.fitSectionBoxToSelection(0.4);
-      if (ok) renderBoxPanel();
-    });
-    actions.appendChild(fitBtn);
-
-    const resetBtn = document.createElement("button");
-    resetBtn.className = "mini";
-    resetBtn.textContent = "Reset Extents";
-    resetBtn.addEventListener("click", () => {
-      viewer.resetSectionBox();
-      renderBoxPanel();
-    });
-    actions.appendChild(resetBtn);
-
-    boxPanel.appendChild(actions);
   }
 }

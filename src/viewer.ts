@@ -1513,7 +1513,7 @@ export class Viewer {
       }
     }
 
-    this.clipState = { ...this.clipState, ...updates }; console.log("clipState after update:", this.clipState);
+    this.clipState = { ...this.clipState, ...updates };
     this.syncClippingPlanes();
     this.onClippingChanged.emit(this.clipState);
   }
