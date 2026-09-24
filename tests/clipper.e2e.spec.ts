@@ -739,3 +739,84 @@ test("footer controls update box dimension without resetting rotation", async ({
     await app.close();
   }
 });
+
+test("lifecycle: toggling helper keeps object counts stable", async ({ page }) => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const result = await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      viewer.setClippingState({ enabled: true, mode: "box", showHelper: true });
+      
+      const count1 = viewer.clippingHelpersGroup.children.length;
+      viewer.setClippingState({ showHelper: false });
+      const count2 = viewer.clippingHelpersGroup.children.length;
+      viewer.setClippingState({ showHelper: true });
+      const count3 = viewer.clippingHelpersGroup.children.length;
+      
+      return { count1, count2, count3 };
+    });
+    
+    // In box mode there are 6 planes + 1 box outline
+    expect(result.count1).toBeGreaterThan(0);
+    expect(result.count2).toBe(0);
+    expect(result.count3).toBe(result.count1);
+  } finally {
+    await app.close();
+  }
+});
+
+test("lifecycle: cancelling drag restores camera controls", async ({ page }) => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const result = await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      viewer.setClippingState({ enabled: true, mode: "plane" });
+      
+      if (viewer.gumball) {
+        viewer.gumball.options.onStart();
+        viewer.gumball.options.onCancel(viewer.gumball.object);
+      }
+      
+      return viewer.world.camera.controls.enabled;
+    });
+    
+    expect(result).toBe(true);
+  } finally {
+    await app.close();
+  }
+});
+
+test("lifecycle: model unload cleans up gumball", async ({ page }) => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const result = await page.evaluate(() => {
+      const viewer = (window as any).__viewer;
+      viewer.setClippingState({ enabled: true, mode: "plane" });
+      
+      // Select something to attach gumball
+      viewer.selectedWidget = { mode: "plane", index: 0 };
+      viewer.syncClippingPlanes();
+      
+      viewer.unloadIfc();
+      
+      return {
+        hasGumball: !!viewer.gumball,
+        attached: !!(viewer.gumball && viewer.gumball.object.parent !== null),
+        dragging: viewer.gumballDragging,
+        helpers: viewer.clippingHelpersGroup.children.length
+      };
+    });
+    
+    expect(result.attached).toBe(false);
+    expect(result.dragging).toBe(false);
+    expect(result.helpers).toBe(0);
+  } finally {
+    await app.close();
+  }
+});

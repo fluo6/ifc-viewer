@@ -726,6 +726,7 @@ export class Viewer {
   unloadIfc(): Promise<void> {
     if (!this.currentModel) return Promise.resolve();
     const model = this.currentModel;
+    this.clearClipping();
     this.setMeasureMode(false);
     this.clearMeasurements();
     this.clearModelBackEdges();
@@ -1784,6 +1785,14 @@ export class Viewer {
    */
   clearClipping(): void {
     this.setClippingState({ enabled: false });
+    if (this.gumball) {
+      if (this.gumballDragging) this.gumball.cancel();
+      this.gumball.dispose();
+      if (this.gumball.object.parent) this.gumball.object.parent.remove(this.gumball.object);
+      this.gumball = undefined as any;
+      this.gumballDragging = false;
+      if (this.world) this.world.camera.controls.enabled = true;
+    }
   }
 
   /**
