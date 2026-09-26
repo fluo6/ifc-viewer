@@ -4,7 +4,6 @@ import * as OBF from "@thatopen/components-front";
 import * as FRAGS from "@thatopen/fragments";
 import fragmentsWorkerUrl from "@thatopen/fragments/worker?url";
 import * as THREE from "three";
-import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { Emitter } from "./events";
 import { IfcParameterReader, type ElementParameters } from "./ifc-parameters";
 import type { IfcSet } from "./ifc-sets";
@@ -181,18 +180,21 @@ export class Viewer {
   private lastSelection: Selection | null = null;
   private activePlanes: THREE.Plane[] = [];
 
-  gumball?: any;
+  gumball?: ClippingGumball;
   private clipRaycaster = new THREE.Raycaster();
   private clipPointer = new THREE.Vector2();
   activeWidgets: THREE.Mesh[] = [];
   private selectedWidget: THREE.Mesh | null = null;
   private gumballDragging = false;
+  private helperMode: ClipMode | null = null;
+  private dragState: ClippingState | null = null;
+  private cameraEnabledBeforeDrag = true;
+  private dragPivot = new THREE.Vector3();
+  private dragFaceAxis: ClipAxis = "z";
+  private dragFaceSign = 1;
 
   private clippingHelpersGroup = new THREE.Group();
   private clippingGizmosGroup = new THREE.Group();
-  private gizmos: { proxy: THREE.Mesh; control: TransformControls }[] = [];
-  private lastGizmoConfig = "";
-  private gizmoDragging = false;
   private clipState: ClippingState = {
     enabled: false,
     mode: "plane",
@@ -201,18 +203,11 @@ export class Viewer {
     sliceDepth: 1,
     boxSize: { x: 1, y: 1, z: 1 },
     showHelper: false,
-    axis: "y",
-    planePos: 0,
-    sliceMin: -1,
-    sliceMax: 1,
-    boxMin: { x: 0, y: 0, z: 0 },
-    boxMax: { x: 1, y: 1, z: 1 },
-    inverted: false,
-  } as any;
+  };
   readonly onClippingChanged = new Emitter<ClippingState>();
 
   get isDraggingGizmo(): boolean {
-    return this.gizmoDragging || this.gumballDragging;
+    return this.gumballDragging;
   }
 
   /**
@@ -258,6 +253,17 @@ export class Viewer {
 
   async init(container: HTMLElement): Promise<void> {
     container.addEventListener("pointerdown", this.onPointerDown.bind(this), true);
+    window.addEventListener("keydown", event => {
+      if (event.key === "Escape" && !this.gumballDragging) {
+        this.selectedWidget = null;
+        this.activeWidgets.forEach(widget => {
+          const material = widget.material as THREE.MeshBasicMaterial;
+          material.color.setHex(0xf0883e);
+          material.opacity = 0.2;
+        });
+        this.gumball?.detach();
+      }
+    });
     const components = new OBC.Components();
     const worlds = components.get(OBC.Worlds);
     const world = worlds.create<
@@ -367,6 +373,12 @@ export class Viewer {
         this.currentModel.useCamera(world.camera.three);
       }
       void fragmentsManager.core.update(true);
+    });
+    world.camera.controls.addEventListener("update", () => {
+      if (this.gumball?.object.visible && !this.gumballDragging) {
+        const t = this.clipState.transform;
+        this.gumball.update({ position: this.selectedWidget?.position.clone() ?? new THREE.Vector3(t.position.x, t.position.y, t.position.z), quaternion: new THREE.Quaternion(t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w), scale: new THREE.Vector3(1, 1, 1) });
+      }
     });
 
     const ifcLoader = components.get(OBC.IfcLoader);
@@ -1365,12 +1377,17 @@ export class Viewer {
   
   private onPointerDown(e: PointerEvent): void {
     if (!this.clipState.enabled || !this.clipState.showHelper) return;
+    if (this.gumballDragging || this.gumball?.hitTest(e)) return;
+    if (e.button !== 0 || !e.isPrimary || e.target !== this.world.renderer!.three.domElement) return;
+    this.clippingHelpersGroup.updateWorldMatrix(true, true);
     const rect = this.world.renderer!.three.domElement.getBoundingClientRect();
     this.clipPointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.clipPointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this.clipRaycaster.setFromCamera(this.clipPointer, this.world.camera.three);
     const hits = this.clipRaycaster.intersectObjects(this.activeWidgets, false);
     if (hits.length > 0) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
       
       this.selectedWidget = hits[0]!.object as THREE.Mesh;
       this.activeWidgets.forEach((w: any) => {
@@ -1383,17 +1400,68 @@ export class Viewer {
             camera: this.world.camera.three,
             domElement: this.world.renderer!.three.domElement,
             scene: this.world.scene.three,
-            onStart: () => { this.gumballDragging = true; },
-            onChange: (t, h, s) => { this.setClippingState({ transform: { position: t.position.clone(), rotation: { x: t.quaternion.x, y: t.quaternion.y, z: t.quaternion.z, w: t.quaternion.w } } } as any); },
-            onEnd: () => { this.gumballDragging = false; this.onClippingChanged.emit(this.clipState); },
-            onCancel: (t) => { this.gumballDragging = false; this.setClippingState({ transform: { position: t.position.clone(), rotation: { x: t.quaternion.x, y: t.quaternion.y, z: t.quaternion.z, w: t.quaternion.w } } } as any); this.onClippingChanged.emit(this.clipState); }
+            translationSnap: () => (this.getModelBoundingBox()?.getSize(new THREE.Vector3()).length() ?? 0) / 200,
+            onStart: (_handle, snapshot) => {
+              this.dragState = this.getClippingState();
+              this.dragPivot.copy(snapshot.position);
+              const index = this.activeWidgets.indexOf(this.selectedWidget!);
+              this.dragFaceAxis = this.clipState.mode === "box" ? (["z", "z", "x", "x", "y", "y"] as const)[index] ?? "z" : "z";
+              this.dragFaceSign = index % 2 === 0 ? (this.dragFaceAxis === "z" ? -1 : 1) : (this.dragFaceAxis === "z" ? 1 : -1);
+              this.gumballDragging = true;
+              this.cameraEnabledBeforeDrag = this.world.camera.controls.enabled;
+              this.world.camera.controls.enabled = false;
+            },
+            onChange: (t, handle) => {
+              const updates: Partial<ClippingState> = {
+                transform: { position: { x: t.position.x, y: t.position.y, z: t.position.z }, rotation: { x: t.quaternion.x, y: t.quaternion.y, z: t.quaternion.z, w: t.quaternion.w } },
+              };
+              const start = this.dragState;
+              if (start && handle.startsWith("scale")) {
+                const scale = t.scale.clone();
+                if (handle === `scale-${this.dragFaceAxis}` && start.mode !== "plane") scale[this.dragFaceAxis] = 1 + this.dragFaceSign * (scale[this.dragFaceAxis] - 1);
+                if (start.mode === "box") updates.boxSize = { x: Math.max(0.001, start.boxSize.x * scale.x), y: Math.max(0.001, start.boxSize.y * scale.y), z: Math.max(0.001, start.boxSize.z * scale.z) };
+                else if (handle === "scale-z" && start.mode === "slice") updates.sliceDepth = Math.max(0.001, start.sliceDepth * scale.z);
+                else updates.planeSize = { x: start.planeSize.x * t.scale.x, y: start.planeSize.y * t.scale.y };
+              }
+              if (start && start.mode !== "plane") {
+                const r = start.transform.rotation;
+                const startRotation = new THREE.Quaternion(r.x, r.y, r.z, r.w);
+                const center = new THREE.Vector3(start.transform.position.x, start.transform.position.y, start.transform.position.z);
+                const normal = new THREE.Vector3();
+                normal[this.dragFaceAxis] = this.dragFaceSign;
+                normal.applyQuaternion(startRotation);
+                const dimension = start.mode === "slice" ? start.sliceDepth : start.boxSize[this.dragFaceAxis];
+                if (handle.startsWith("rotate")) {
+                  center.sub(this.dragPivot).applyQuaternion(t.quaternion.clone().multiply(startRotation.invert())).add(this.dragPivot);
+                } else if (handle.startsWith("translate") || handle.startsWith("plane")) {
+                  const delta = t.position.clone().sub(this.dragPivot);
+                  const movement = delta.dot(normal);
+                  const nextDimension = Math.max(0.001, dimension + movement);
+                  center.add(delta.addScaledVector(normal, -movement)).addScaledVector(normal, (nextDimension - dimension) / 2);
+                  if (start.mode === "slice") updates.sliceDepth = nextDimension;
+                  else updates.boxSize = { ...start.boxSize, [this.dragFaceAxis]: nextDimension };
+                } else {
+                  const nextDimension = start.mode === "slice" ? updates.sliceDepth ?? dimension : updates.boxSize?.[this.dragFaceAxis] ?? dimension;
+                  center.addScaledVector(normal, (nextDimension - dimension) / 2);
+                }
+                updates.transform!.position = { x: center.x, y: center.y, z: center.z };
+              }
+              this.setClippingState(updates);
+            },
+            onEnd: () => this.finishGumballDrag(),
+            onCancel: () => {
+              const start = this.dragState;
+              if (start) this.setClippingState(start);
+              this.finishGumballDrag();
+            },
          });
          this.clippingGizmosGroup.add(this.gumball.object);
       }
       
       const t = this.clipState.transform;
+      this.gumball.setMode(this.clipState.mode);
       this.gumball.attach({
-        position: new THREE.Vector3(t.position.x, t.position.y, t.position.z),
+        position: this.selectedWidget.position.clone(),
         quaternion: new THREE.Quaternion(t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w),
         scale: new THREE.Vector3(1,1,1)
       });
@@ -1406,6 +1474,15 @@ export class Viewer {
       });
       if (this.gumball) this.gumball.detach();
     }
+  }
+
+  private finishGumballDrag(): void {
+    this.gumballDragging = false;
+    this.dragState = null;
+    this.world.camera.controls.enabled = this.cameraEnabledBeforeDrag;
+    const t = this.clipState.transform;
+    this.gumball?.update({ position: this.selectedWidget?.position.clone() ?? new THREE.Vector3(t.position.x, t.position.y, t.position.z), quaternion: new THREE.Quaternion(t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w), scale: new THREE.Vector3(1, 1, 1) });
+    this.onClippingChanged.emit(this.getClippingState());
   }
 
   private initClippingStateForModel(): void {
@@ -1422,52 +1499,24 @@ export class Viewer {
       },
       planeSize: { x: size.x, y: size.z },
       sliceDepth: size.y * 0.5,
-      boxSize: { x: size.x, y: size.y, z: size.z },
+      boxSize: { x: size.x, y: size.z, z: size.y },
       showHelper: false,
-      axis: "y",
-      planePos: 0,
-      sliceMin: -1,
-      sliceMax: 1,
-      boxMin: { x: 0, y: 0, z: 0 },
-      boxMax: { x: 1, y: 1, z: 1 },
-      inverted: false,
-    } as any;
+    };
   }
 
   /**
    * Returns current clipping configuration.
    */
   getClippingState(): Readonly<ClippingState> {
-    return { ...this.clipState };
+    return structuredClone(this.clipState);
   }
 
   /**
    * Updates clipping configuration and applies the resulting planes to the renderer.
    */
   setClippingState(updates: Partial<ClippingState>): void {
-    const u = updates as any;
-    const cs = this.clipState as any;
-    if (u.axis !== undefined || u.inverted !== undefined || u.planePos !== undefined) {
-      const axis = u.axis ?? cs.axis;
-      const inverted = u.inverted ?? cs.inverted;
-      const planePos = u.planePos ?? cs.planePos;
-      
-      let x = 0, y = 0, z = 0;
-      let rot = { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 };
-      
-      if (axis === "x") {
-        x = planePos;
-        rot = inverted ? { x: 0, y: Math.SQRT1_2, z: 0, w: Math.SQRT1_2 } : { x: 0, y: -Math.SQRT1_2, z: 0, w: Math.SQRT1_2 };
-      } else if (axis === "y") {
-        y = planePos;
-        rot = inverted ? { x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 } : { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 };
-      } else if (axis === "z") {
-        z = planePos;
-        rot = inverted ? { x: 0, y: 1, z: 0, w: 0 } : { x: 0, y: 0, z: 0, w: 1 };
-      }
-      
-      updates.transform = { position: { x, y, z }, rotation: rot };
-    }
+    if (this.gumballDragging && (updates.enabled === false || updates.showHelper === false || (updates.mode && updates.mode !== this.clipState.mode))) this.gumball?.cancel();
+    updates = structuredClone(updates);
 
     if (updates.transform) {
       const { position, rotation } = updates.transform;
@@ -1477,7 +1526,7 @@ export class Viewer {
       const lenSq = rotation.x**2 + rotation.y**2 + rotation.z**2 + rotation.w**2;
       if (lenSq < 1e-10) {
         updates.transform.rotation = { x: 0, y: 0, z: 0, w: 1 };
-      } else {
+      } else if (Math.abs(lenSq - 1) > 1e-12) {
         const len = Math.sqrt(lenSq);
         updates.transform.rotation = {
           x: rotation.x / len,
@@ -1488,12 +1537,17 @@ export class Viewer {
       }
     }
     
-    if (updates.sliceDepth !== undefined) updates.sliceDepth = Math.max(updates.sliceDepth, 0.001);
+    if (updates.sliceDepth !== undefined) {
+      if (!Number.isFinite(updates.sliceDepth)) return;
+      updates.sliceDepth = Math.max(updates.sliceDepth, 0.001);
+    }
     if (updates.planeSize !== undefined) {
+      if (!Number.isFinite(updates.planeSize.x) || !Number.isFinite(updates.planeSize.y)) return;
       updates.planeSize.x = Math.max(updates.planeSize.x, 0.001);
       updates.planeSize.y = Math.max(updates.planeSize.y, 0.001);
     }
     if (updates.boxSize !== undefined) {
+      if (!Number.isFinite(updates.boxSize.x) || !Number.isFinite(updates.boxSize.y) || !Number.isFinite(updates.boxSize.z)) return;
       updates.boxSize.x = Math.max(updates.boxSize.x, 0.001);
       updates.boxSize.y = Math.max(updates.boxSize.y, 0.001);
       updates.boxSize.z = Math.max(updates.boxSize.z, 0.001);
@@ -1516,30 +1570,35 @@ export class Viewer {
 
     this.clipState = { ...this.clipState, ...updates };
     this.syncClippingPlanes();
-    this.onClippingChanged.emit(this.clipState);
+    this.onClippingChanged.emit(this.getClippingState());
   }
 
   /**
    * Cleans up 3D wireframe helpers.
    */
   private clearClippingHelpers(): void {
+    this.selectedWidget = null;
+    this.gumball?.detach();
     while (this.clippingHelpersGroup.children.length > 0) {
       const child = this.clippingHelpersGroup.children[0] as any;
-      if (child.geometry) child.geometry.dispose();
-      if (child.material) {
-        if (Array.isArray(child.material)) child.material.forEach((m: any) => m.dispose());
-        else child.material.dispose();
-      }
+      child.traverse((object: any) => {
+        object.geometry?.dispose();
+        if (Array.isArray(object.material)) object.material.forEach((m: THREE.Material) => m.dispose());
+        else object.material?.dispose();
+      });
       this.clippingHelpersGroup.remove(child);
     }
     this.activeWidgets = [];
+    this.helperMode = null;
   }
 
   private syncClippingPlanes(): void {
     const renderer = this.world?.renderer;
     if (!renderer) return;
 
-    this.clearClippingHelpers();
+    if (!this.clipState.enabled || !this.currentModel || !this.clipState.showHelper || this.helperMode !== this.clipState.mode) {
+      this.clearClippingHelpers();
+    }
 
     if (!this.clipState.enabled || !this.currentModel) {
       for (const p of this.activePlanes) {
@@ -1560,12 +1619,21 @@ export class Viewer {
     const up = new THREE.Vector3(0, 1, 0).applyQuaternion(quat).normalize();
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(quat).normalize();
 
+    let widgetIndex = 0;
     const createWidget = (center: THREE.Vector3, normal: THREE.Vector3, w: number, h: number, q: THREE.Quaternion) => {
-       const geo = new THREE.PlaneGeometry(w, h);
+       const existing = this.activeWidgets[widgetIndex++];
+       if (existing) {
+         existing.position.copy(center);
+         existing.quaternion.copy(q);
+         existing.scale.set(w, h, 1);
+         return existing;
+       }
+       const geo = new THREE.PlaneGeometry(1, 1);
        const mat = new THREE.MeshBasicMaterial({ color: 0xf0883e, side: THREE.DoubleSide, transparent: true, opacity: 0.2, depthWrite: false });
        const mesh = new THREE.Mesh(geo, mat);
        mesh.position.copy(center);
        mesh.quaternion.copy(q);
+       mesh.scale.set(w, h, 1);
        
        const edges = new THREE.EdgesGeometry(geo);
        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xf0883e }));
@@ -1573,6 +1641,7 @@ export class Viewer {
        
        this.clippingHelpersGroup.add(mesh);
        this.activeWidgets.push(mesh);
+       this.helperMode = mode;
        return mesh;
     };
 
@@ -1624,22 +1693,29 @@ export class Viewer {
       }
     }
 
-    const planesToAdd = desiredPlanes.filter(dp => !this.activePlanes.some(ap => ap.normal.equals(dp.normal) && Math.abs(ap.constant - dp.constant) < 1e-6));
-    const planesToRemove = this.activePlanes.filter(ap => !desiredPlanes.some(dp => dp.normal.equals(ap.normal) && Math.abs(dp.constant - ap.constant) < 1e-6));
+    if (mode !== "plane") desiredPlanes.forEach(plane => plane.negate());
 
-    for (const p of planesToRemove) {
-      renderer.setPlane(false, p);
+    if (this.activePlanes.length !== desiredPlanes.length) {
+      this.activePlanes.forEach(plane => renderer.setPlane(false, plane));
+      this.activePlanes = desiredPlanes;
+      this.activePlanes.forEach(plane => renderer.setPlane(true, plane));
+    } else {
+      let changed = false;
+      this.activePlanes.forEach((plane, index) => {
+        const desired = desiredPlanes[index]!;
+        if (!plane.equals(desired)) {
+          plane.copy(desired);
+          changed = true;
+        }
+      });
+      if (changed) renderer.updateClippingPlanes();
     }
-    for (const p of planesToAdd) {
-      renderer.setPlane(true, p);
-    }
-
-    this.activePlanes = desiredPlanes;
     
     if (this.selectedWidget && this.activeWidgets.includes(this.selectedWidget)) {
         const mat = this.selectedWidget.material as THREE.MeshBasicMaterial;
         mat.color.setHex(0xffaa00);
         mat.opacity = 0.6;
+        this.gumball?.update({ position: this.selectedWidget.position.clone(), quaternion: quat, scale: new THREE.Vector3(1, 1, 1) });
     } else {
         this.selectedWidget = null;
         if (this.gumball) this.gumball.detach();
@@ -1648,107 +1724,6 @@ export class Viewer {
     this.world?.renderer?.update();
   }
 
-  private syncGizmos(): void {
-    if (this.gizmoDragging) return;
-
-    const { mode, enabled, showHelper } = this.clipState;
-    const { axis, planePos, sliceMin, sliceMax, boxMin, boxMax } = this.clipState as any;
-    const configStr = `${enabled}-${showHelper}-${mode}-${axis}`;
-    const structuralChange = configStr !== this.lastGizmoConfig;
-    this.lastGizmoConfig = configStr;
-
-    if (structuralChange) {
-      for (const g of this.gizmos) {
-        g.control.detach();
-        g.control.dispose();
-        this.clippingGizmosGroup.remove(g.proxy);
-        this.clippingGizmosGroup.remove(g.control as any);
-      }
-      this.gizmos = [];
-
-      if (!enabled || !showHelper || !this.currentModel) {
-        this.world?.renderer?.update();
-        return;
-      }
-
-      const box = this.getModelBoundingBox();
-      const center = box ? box.getCenter(new THREE.Vector3()) : new THREE.Vector3();
-
-      const createGizmo = (
-        gizmoAxis: ClipAxis,
-        initialPos: number,
-        onDrag: (val: number) => void
-      ) => {
-        const proxy = new THREE.Mesh(
-          new THREE.BoxGeometry(0.1, 0.1, 0.1),
-          new THREE.MeshBasicMaterial({ visible: false })
-        );
-        proxy.position.copy(center);
-        proxy.position[gizmoAxis] = initialPos;
-        this.clippingGizmosGroup.add(proxy);
-
-        const control = new TransformControls(
-          this.world.camera.three,
-          this.world.renderer!.three.domElement
-        );
-        control.attach(proxy);
-        control.showX = gizmoAxis === "x";
-        control.showY = gizmoAxis === "y";
-        control.showZ = gizmoAxis === "z";
-        control.showXY = false;
-        control.showXZ = false;
-        control.showYZ = false;
-        control.size = 1.25;
-        control.setMode("translate");
-
-        control.addEventListener("dragging-changed", (event: any) => {
-          this.gizmoDragging = event.value;
-          this.world.camera.controls.enabled = !event.value;
-          if (!event.value) this.onClippingChanged.emit(this.clipState);
-        });
-
-        control.addEventListener("change", () => {
-          if (this.gizmoDragging) {
-            onDrag(proxy.position[gizmoAxis]);
-          }
-        });
-
-        this.clippingGizmosGroup.add(control as any);
-        this.gizmos.push({ proxy, control });
-      };
-
-      if (mode === "plane") {
-        createGizmo(axis, planePos, (val) => this.setClippingState({ planePos: val } as any));
-      } else if (mode === "slice") {
-        createGizmo(axis, sliceMin, (val) => this.setClippingState({ sliceMin: val } as any));
-        createGizmo(axis, sliceMax, (val) => this.setClippingState({ sliceMax: val } as any));
-      } else if (mode === "box") {
-        createGizmo("x", boxMin.x, (val) => this.setClippingState({ boxMin: { ...(this.clipState as any).boxMin, x: val } } as any));
-        createGizmo("x", boxMax.x, (val) => this.setClippingState({ boxMax: { ...(this.clipState as any).boxMax, x: val } } as any));
-        createGizmo("y", boxMin.y, (val) => this.setClippingState({ boxMin: { ...(this.clipState as any).boxMin, y: val } } as any));
-        createGizmo("y", boxMax.y, (val) => this.setClippingState({ boxMax: { ...(this.clipState as any).boxMax, y: val } } as any));
-        createGizmo("z", boxMin.z, (val) => this.setClippingState({ boxMin: { ...(this.clipState as any).boxMin, z: val } } as any));
-        createGizmo("z", boxMax.z, (val) => this.setClippingState({ boxMax: { ...(this.clipState as any).boxMax, z: val } } as any));
-      }
-    } else {
-      // Not a structural change, just sync proxy positions
-      if (this.gizmos.length > 0 && enabled && showHelper && this.currentModel) {
-        if (mode === "plane" && this.gizmos[0]) {
-          (this.gizmos[0].proxy.position as any)[axis] = planePos;
-        } else if (mode === "slice" && this.gizmos.length >= 2) {
-          (this.gizmos[0].proxy.position as any)[axis] = sliceMin;
-          (this.gizmos[1].proxy.position as any)[axis] = sliceMax;
-        } else if (mode === "box" && this.gizmos.length >= 6) {
-          this.gizmos[0].proxy.position["x"] = boxMin.x;
-          this.gizmos[1].proxy.position["x"] = boxMax.x;
-          this.gizmos[2].proxy.position["y"] = boxMin.y;
-          this.gizmos[3].proxy.position["y"] = boxMax.y;
-          this.gizmos[4].proxy.position["z"] = boxMin.z;
-          this.gizmos[5].proxy.position["z"] = boxMax.z;
-        }
-      }
-    }
-  }
 
   /**
    * Horizontal clipping plane at `height`, hiding everything above it.
@@ -1791,7 +1766,6 @@ export class Viewer {
       if (this.gumball.object.parent) this.gumball.object.parent.remove(this.gumball.object);
       this.gumball = undefined as any;
       this.gumballDragging = false;
-      if (this.world) this.world.camera.controls.enabled = true;
     }
   }
 
@@ -1823,12 +1797,23 @@ export class Viewer {
       selBox.max.z = Math.min(selBox.max.z, modelBox.max.z);
     }
 
+    const rotation = this.clipState.transform.rotation;
+    const frame = new THREE.Quaternion(rotation.x, rotation.y, rotation.z, rotation.w);
+    const inverse = frame.clone().invert();
+    const localBounds = new THREE.Box3();
+    for (const x of [selBox.min.x, selBox.max.x]) {
+      for (const y of [selBox.min.y, selBox.max.y]) {
+        for (const z of [selBox.min.z, selBox.max.z]) localBounds.expandByPoint(new THREE.Vector3(x, y, z).applyQuaternion(inverse));
+      }
+    }
+    const center = localBounds.getCenter(new THREE.Vector3()).applyQuaternion(frame);
+    const size = localBounds.getSize(new THREE.Vector3());
     this.setClippingState({
       enabled: true,
       mode: "box",
-      boxMin: { x: selBox.min.x, y: selBox.min.y, z: selBox.min.z },
-      boxMax: { x: selBox.max.x, y: selBox.max.y, z: selBox.max.z },
-    } as any);
+      transform: { position: { x: center.x, y: center.y, z: center.z }, rotation },
+      boxSize: { x: size.x, y: size.y, z: size.z },
+    });
     return true;
   }
 
@@ -1839,9 +1824,9 @@ export class Viewer {
     const box = this.getModelBoundingBox();
     if (!box) return;
     this.setClippingState({
-      boxMin: { x: box.min.x, y: box.min.y, z: box.min.z },
-      boxMax: { x: box.max.x, y: box.max.y, z: box.max.z },
-    } as any);
+      transform: { position: box.getCenter(new THREE.Vector3()), rotation: { x: 0, y: 0, z: 0, w: 1 } },
+      boxSize: box.getSize(new THREE.Vector3()),
+    });
   }
 
   /**

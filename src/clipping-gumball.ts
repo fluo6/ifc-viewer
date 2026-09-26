@@ -20,6 +20,7 @@ export interface ClippingGumballOptions {
   onChange: (transform: GumballTransform, handle: GumballHandle, snapped: boolean) => void;
   onEnd: () => void;
   onCancel: (snapshot: GumballTransform) => void;
+  translationSnap?: () => number;
 }
 
 export class ClippingGumball {
@@ -44,6 +45,8 @@ export class ClippingGumball {
   private materials: THREE.Material[] = [];
   private geometries: THREE.BufferGeometry[] = [];
   private attached = false;
+  private transformScale = new THREE.Vector3(1, 1, 1);
+  private startDisplayScale = 1;
 
   constructor(options: ClippingGumballOptions) {
     this.options = options;
@@ -80,8 +83,15 @@ export class ClippingGumball {
     this.geometries.push(arrowGeo, lineGeo, planeGeo, arcGeo, scaleGeo);
     
     const addHandle = (geo: THREE.BufferGeometry, mat: THREE.Material, name: GumballHandle, xRot: number, yRot: number, zRot: number) => {
-      const m = new THREE.Mesh(geo, mat);
-      m.userData = { handle: name };
+      const handleMaterial = mat.clone();
+      // Section planes cut the model, not the handles used to move them.
+      handleMaterial.onBeforeCompile = shader => {
+        shader.fragmentShader = shader.fragmentShader.replace("#include <clipping_planes_fragment>", "");
+      };
+      this.materials.push(handleMaterial);
+      const m = new THREE.Mesh(geo, handleMaterial);
+      m.userData = { handle: name, color: (handleMaterial as THREE.MeshBasicMaterial).color.getHex() };
+      m.renderOrder = 1000;
       m.rotation.set(xRot, yRot, zRot);
       this.handles.push(m);
       this.object.add(m);
@@ -112,39 +122,43 @@ export class ClippingGumball {
   }
 
   private bindEvents() {
-    this.options.domElement.addEventListener('pointerdown', this.onPointerDown);
+    this.options.domElement.addEventListener('pointerdown', this.onPointerDown, true);
     this.options.domElement.addEventListener('pointermove', this.onPointerMove);
     this.options.domElement.addEventListener('pointerup', this.onPointerUp);
     this.options.domElement.addEventListener('pointercancel', this.onPointerCancel);
+    this.options.domElement.addEventListener('lostpointercapture', this.onPointerCancel);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('blur', this.onBlur);
   }
 
   private unbindEvents() {
-    this.options.domElement.removeEventListener('pointerdown', this.onPointerDown);
+    this.options.domElement.removeEventListener('pointerdown', this.onPointerDown, true);
     this.options.domElement.removeEventListener('pointermove', this.onPointerMove);
     this.options.domElement.removeEventListener('pointerup', this.onPointerUp);
     this.options.domElement.removeEventListener('pointercancel', this.onPointerCancel);
+    this.options.domElement.removeEventListener('lostpointercapture', this.onPointerCancel);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('blur', this.onBlur);
   }
 
   private onPointerDown = (e: PointerEvent) => {
-    if (!this.object.visible || this.activeHandle) return;
-    this.updatePointer(e);
-    this.raycaster.setFromCamera(this.pointer, this.options.camera);
-    const hits = this.raycaster.intersectObjects(this.handles, true);
-    if (hits.length > 0 && hits[0]) {
-      e.stopPropagation();
-      this.activeHandle = hits[0].object.userData.handle as GumballHandle;
+    if (!this.object.visible || this.activeHandle || e.button !== 0 || !e.isPrimary) return;
+    const handle = this.pickHandle(e);
+    if (handle) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      this.activeHandle = handle;
       this.pointerId = e.pointerId;
       try { this.options.domElement.setPointerCapture(e.pointerId); } catch {}
       
       this.snapshot = {
         position: this.object.position.clone(),
         quaternion: this.object.quaternion.clone(),
-        scale: this.object.scale.clone()
+        scale: this.transformScale.clone()
       };
+      this.startDisplayScale = this.object.scale.x;
+      this.highlight(this.activeHandle);
+      this.options.onStart(this.activeHandle, this.snapshot);
       
       this.startPointer.copy(this.pointer);
       this.startRay.copy(this.raycaster.ray);
@@ -167,26 +181,32 @@ export class ClippingGumball {
         axis.applyQuaternion(this.snapshot.quaternion).normalize();
         this.dragPlane.setFromNormalAndCoplanarPoint(axis, this.object.position);
       } else {
-        this.dragPlane.setFromNormalAndCoplanarPoint(camFwd, this.object.position);
+        const axis = new THREE.Vector3(
+          this.activeHandle.endsWith('x') ? 1 : 0,
+          this.activeHandle.endsWith('y') ? 1 : 0,
+          this.activeHandle.endsWith('z') ? 1 : 0,
+        ).applyQuaternion(this.snapshot.quaternion);
+        camFwd.addScaledVector(axis, -camFwd.dot(axis));
+        if (camFwd.lengthSq() < 1e-8) {
+          this.cancel();
+          return;
+        }
+        this.dragPlane.setFromNormalAndCoplanarPoint(camFwd.normalize(), this.object.position);
       }
       
-      this.startRay.intersectPlane(this.dragPlane, this.startIntersection);
-      
-      this.options.onStart(this.activeHandle, this.snapshot);
+      if (!this.startRay.intersectPlane(this.dragPlane, this.startIntersection)) {
+        this.cancel();
+        return;
+      }
     }
   };
 
-  private getModelDiagonal(): number {
-    const v = (window as any).__viewer;
-    if (v) {
-       const box = v.getModelBoundingBox();
-       if (box) return box.getSize(new THREE.Vector3()).length();
-    }
-    return 100;
-  }
-
   private onPointerMove = (e: PointerEvent) => {
-    if (!this.activeHandle || !this.snapshot) return;
+    if (!this.activeHandle) {
+      if (this.object.visible) this.highlight(this.pickHandle(e));
+      return;
+    }
+    if (!this.snapshot || e.pointerId !== this.pointerId) return;
     e.stopPropagation();
     this.updatePointer(e);
     this.raycaster.setFromCamera(this.pointer, this.options.camera);
@@ -195,7 +215,7 @@ export class ClippingGumball {
       const delta = new THREE.Vector3().subVectors(this.dragIntersection, this.startIntersection);
       
       let snapped = false;
-      let snapDisp = e.shiftKey ? this.getModelDiagonal() / 200 : 0;
+      let snapDisp = e.shiftKey ? (this.options.translationSnap?.() ?? 0) : 0;
       let snapRot = e.shiftKey ? Math.PI / 36 : 0;
       
       const newPos = this.snapshot.position.clone();
@@ -216,15 +236,17 @@ export class ClippingGumball {
         }
         newPos.addScaledVector(axis, dist);
       } else if (this.activeHandle.startsWith('plane')) {
+        delta.applyQuaternion(this.snapshot.quaternion.clone().invert());
         if (snapDisp > 0) {
            delta.x = Math.round(delta.x / snapDisp) * snapDisp;
            delta.y = Math.round(delta.y / snapDisp) * snapDisp;
            delta.z = Math.round(delta.z / snapDisp) * snapDisp;
            snapped = true;
         }
+        delta.applyQuaternion(this.snapshot.quaternion);
         newPos.add(delta);
       } else if (this.activeHandle.startsWith('rotate')) {
-        const center = this.object.position;
+        const center = this.snapshot.position;
         const v1 = new THREE.Vector3().subVectors(this.startIntersection, center).normalize();
         const v2 = new THREE.Vector3().subVectors(this.dragIntersection, center).normalize();
         
@@ -250,7 +272,7 @@ export class ClippingGumball {
         axis.applyQuaternion(this.snapshot.quaternion).normalize();
         
         const dist = delta.dot(axis);
-        const factor = 1 + dist;
+        const factor = 1 + dist / (this.startDisplayScale * 0.6);
         if (this.activeHandle === 'scale-x') newScale.x *= factor;
         if (this.activeHandle === 'scale-y') newScale.y *= factor;
         if (this.activeHandle === 'scale-z') newScale.z *= factor;
@@ -263,23 +285,25 @@ export class ClippingGumball {
       };
       this.object.position.copy(newPos);
       this.object.quaternion.copy(newQuat);
-      this.object.scale.copy(newScale);
+      this.transformScale.copy(newScale);
       this.options.onChange(nextTransform, this.activeHandle, snapped);
     }
   };
 
   private onPointerUp = (e: PointerEvent) => {
+    if (!this.activeHandle || e.pointerId !== this.pointerId) return;
+    this.onPointerMove(e);
     if (!this.activeHandle) return;
-    if (this.pointerId !== null) {
-       try { this.options.domElement.releasePointerCapture(this.pointerId); } catch {}
-    }
+    const pointerId = this.pointerId;
     this.activeHandle = null;
     this.pointerId = null;
     this.snapshot = null;
+    this.highlight(null);
+    try { this.options.domElement.releasePointerCapture(pointerId); } catch {}
     this.options.onEnd();
   };
   
-  private onPointerCancel = () => this.cancel();
+  private onPointerCancel = (e: PointerEvent) => { if (e.pointerId === this.pointerId) this.cancel(); };
   private onKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') this.cancel(); };
   private onBlur = () => this.cancel();
 
@@ -296,17 +320,25 @@ export class ClippingGumball {
   }
 
   detach(): void {
+    this.cancel();
     this.attached = false;
     this.object.visible = false;
+    this.highlight(null);
   }
 
   setVisible(visible: boolean): void {
+    if (!visible) this.cancel();
     this.object.visible = visible && this.attached;
+  }
+
+  setMode(mode: "plane" | "slice" | "box"): void {
+    for (const handle of this.handles) handle.visible = mode !== "plane" || handle.userData.handle !== "scale-z";
   }
 
   update(transform: GumballTransform): void {
     this.object.position.copy(transform.position);
     this.object.quaternion.copy(transform.quaternion);
+    this.transformScale.copy(transform.scale);
     
     const dist = this.options.camera.position.distanceTo(this.object.position);
     let scale = dist * 0.15;
@@ -317,21 +349,48 @@ export class ClippingGumball {
   }
 
   cancel(): void {
-    if (this.activeHandle && this.snapshot) {
-      this.object.position.copy(this.snapshot.position);
-      this.object.quaternion.copy(this.snapshot.quaternion);
-      this.object.scale.copy(this.snapshot.scale);
-      this.options.onCancel(this.snapshot);
-    }
-    if (this.pointerId !== null) {
-      try { this.options.domElement.releasePointerCapture(this.pointerId); } catch {}
-    }
+    const snapshot = this.activeHandle ? this.snapshot : null;
+    const pointerId = this.pointerId;
     this.activeHandle = null;
     this.pointerId = null;
     this.snapshot = null;
+    this.highlight(null);
+    if (pointerId !== null) {
+      try { this.options.domElement.releasePointerCapture(pointerId); } catch {}
+    }
+    if (snapshot) {
+      this.update(snapshot);
+      this.options.onCancel(snapshot);
+    }
+  }
+
+  hitTest(e: PointerEvent): boolean {
+    return this.pickHandle(e) !== null;
+  }
+
+  private pickHandle(e: PointerEvent): GumballHandle | null {
+    if (!this.object.visible) return null;
+    this.object.updateWorldMatrix(true, true);
+    this.updatePointer(e);
+    this.raycaster.setFromCamera(this.pointer, this.options.camera);
+    const hits = this.raycaster.intersectObjects(this.handles.filter(h => h.visible), false);
+    // Scale cubes sit on the rotation arcs and translation shafts.
+    hits.sort((a, b) => Number(!a.object.userData.handle.startsWith('scale')) - Number(!b.object.userData.handle.startsWith('scale')) || a.distance - b.distance);
+    return hits[0]?.object.userData.handle ?? null;
+  }
+
+  private highlight(handle: GumballHandle | null): void {
+    for (const mesh of this.handles) {
+      const material = mesh.material as THREE.MeshBasicMaterial;
+      material.color.setHex(mesh.userData.color);
+      if (mesh.userData.handle === handle) material.color.lerp(new THREE.Color(0xffffff), 0.5);
+      material.opacity = mesh.userData.handle === handle ? 1 : 0.8;
+    }
+    this.options.domElement.style.cursor = handle ? "grab" : "";
   }
 
   dispose(): void {
+    this.cancel();
     this.unbindEvents();
     this.geometries.forEach(g => g.dispose());
     this.materials.forEach(m => m.dispose());

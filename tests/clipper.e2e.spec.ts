@@ -4,6 +4,233 @@ import path from "node:path";
 
 import { launchViewer, readyWindow } from "./launch";
 
+test("continuous slider input preserves the gesture and tangential position", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    await page.evaluate(() => {
+      const v = (window as any).__viewer;
+      v.setClippingState({ enabled: true, transform: {
+        position: { x: 0.12, y: 0.1, z: 0.08 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+      } });
+    });
+    const result = await page.locator("#clipper .clip-slider").evaluate((element) => {
+      const slider = element as HTMLInputElement;
+      slider.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1 }));
+      const value = Number(slider.min) + (Number(slider.max) - Number(slider.min)) * 0.4;
+      for (let i = 0; i < 5; i++) {
+        slider.value = String(value + i * Number(slider.step));
+        slider.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      return { connected: slider.isConnected, offset: Number(slider.value), position: (window as any).__viewer.getClippingState().transform.position };
+    });
+    expect(result.connected).toBe(true);
+    expect(result.position.x).toBeCloseTo(0.12);
+    expect(result.position.y).toBeCloseTo(0.1);
+    expect(result.position.z).toBeCloseTo(result.offset, 5);
+  } finally { await app.close(); }
+});
+
+test("held keyboard slider input keeps focus and resumes after keyup", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    await page.locator("#clipper-toggle").click();
+    const slider = page.locator("#clipper .clip-slider");
+    await slider.focus();
+    await slider.evaluate(e => { (window as any).__activeClipSlider = e; });
+    await page.keyboard.down("ArrowRight");
+    await page.keyboard.down("ArrowRight");
+    expect(await page.evaluate(() => (window as any).__activeClipSlider.isConnected)).toBe(true);
+    await page.keyboard.up("ArrowRight");
+    await expect(slider).toBeFocused();
+    const before = await slider.inputValue();
+    await page.keyboard.press("ArrowLeft");
+    await expect(slider).toBeFocused();
+    expect(await slider.inputValue()).not.toBe(before);
+  } finally { await app.close(); }
+});
+
+test("negative box-face scaling follows the pointer and anchors the opposite face", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    await page.evaluate(async () => {
+      const v = (window as any).__viewer;
+      v.setClippingState({ enabled: true, showHelper: true, mode: "box", transform: { position: { x: 0, y: 2.5, z: 0 }, rotation: { x: 0, y: 0, z: 0, w: 1 } }, boxSize: { x: 2, y: 2, z: 2 } });
+      await v.world.camera.controls.setLookAt(-8, 7, 6, 0, 2.5, 0, false);
+      v.world.camera.controls.update(0);
+      v.world.camera.three.updateMatrixWorld();
+    });
+    const face = await page.evaluate(() => {
+      const v = (window as any).__viewer;
+      const p = v.activeWidgets[3].position.clone().project(v.world.camera.three);
+      const r = v.world.renderer.three.domElement.getBoundingClientRect();
+      return { x: r.left + (p.x + 1) * r.width / 2, y: r.top + (1 - p.y) * r.height / 2 };
+    });
+    await page.mouse.click(face.x, face.y);
+    expect(await page.evaluate(() => { const v = (window as any).__viewer; return v.activeWidgets.indexOf(v.selectedWidget); })).toBe(3);
+    const p = await gumballPoint(page, "scale-x");
+    const end = await gumballPoint(page, "scale-x", { x: 0, y: 0.8, z: 0 });
+    const pastMinimum = await gumballPoint(page, "scale-x", { x: 0, y: 2, z: 0 });
+    await page.mouse.move(p.x, p.y);
+    await page.mouse.down();
+    expect(await page.evaluate(() => (window as any).__viewer.gumball.activeHandle)).toBe("scale-x");
+    await page.mouse.move(end.x, end.y, { steps: 8 });
+    await page.mouse.move(pastMinimum.x, pastMinimum.y, { steps: 8 });
+    await page.mouse.up();
+    const after = await page.evaluate(() => (window as any).__viewer.getClippingState());
+    expect(after.boxSize.x).toBeCloseTo(0.001, 5);
+    expect(after.transform.position.x + after.boxSize.x / 2).toBeCloseTo(1, 5);
+  } finally { await app.close(); }
+});
+
+async function selectClippingWidget(page: import("playwright").Page) {
+  await page.evaluate(() => (window as any).__viewer.setClippingState({ enabled: true, showHelper: true }));
+  const point = await page.evaluate(() => {
+    const v = (window as any).__viewer;
+    const widget = v.activeWidgets[0];
+    widget.updateWorldMatrix(true, false);
+    const p = widget.position.clone().set(0.3, 0.3, 0);
+    widget.localToWorld(p).project(v.world.camera.three);
+    const rect = v.world.renderer.three.domElement.getBoundingClientRect();
+    return { x: rect.left + (p.x + 1) * rect.width / 2, y: rect.top + (1 - p.y) * rect.height / 2 };
+  });
+  await page.mouse.click(point.x, point.y);
+  expect(await page.evaluate(() => Boolean((window as any).__viewer.gumball?.object.visible))).toBe(true);
+}
+
+async function gumballPoint(page: import("playwright").Page, handleName: string, local?: { x: number; y: number; z: number }) {
+  return page.evaluate(({ name, local }) => {
+    const v = (window as any).__viewer;
+    const g = v.gumball;
+    g.object.updateWorldMatrix(true, true);
+    const handle = g.object.children.find((h: any) => h.userData.handle === name);
+    handle.geometry.computeBoundingSphere();
+    const p = handle.geometry.boundingSphere.center.clone();
+    if (local) p.set(local.x, local.y, local.z);
+    handle.localToWorld(p).project(v.world.camera.three);
+    const r = v.world.renderer.three.domElement.getBoundingClientRect();
+    return { x: r.left + (p.x + 1) * r.width / 2, y: r.top + (1 - p.y) * r.height / 2 };
+  }, { name: handleName, local });
+}
+
+test("Shift snaps real rotation and translation drags", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    await selectClippingWidget(page);
+    const before = await page.evaluate(() => (window as any).__viewer.getClippingState());
+    const start = await gumballPoint(page, "rotate-z", { x: 0.6 * Math.cos(0.25), y: 0.6 * Math.sin(0.25), z: 0 });
+    const end = await gumballPoint(page, "rotate-z", { x: 0.6 * Math.cos(0.55), y: 0.6 * Math.sin(0.55), z: 0 });
+    await page.keyboard.down("Shift");
+    await page.mouse.move(start.x, start.y);
+    await page.mouse.down();
+    expect(await page.evaluate(() => (window as any).__viewer.isDraggingGizmo)).toBe(true);
+    await page.mouse.move(end.x, end.y, { steps: 8 });
+    await page.mouse.up();
+    const rotated = await page.evaluate(() => (window as any).__viewer.getClippingState());
+    const a = before.transform.rotation, b = rotated.transform.rotation;
+    const angle = 2 * Math.acos(Math.min(1, Math.abs(a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w))) * 180 / Math.PI;
+    expect(angle).toBeCloseTo(15, 3);
+    const p = await gumballPoint(page, "translate-x");
+    await page.mouse.move(p.x, p.y);
+    await page.mouse.down();
+    await page.mouse.move(p.x + 40, p.y, { steps: 8 });
+    await page.mouse.up();
+    await page.keyboard.up("Shift");
+    const result = await page.evaluate((position) => {
+      const v = (window as any).__viewer;
+      const p = v.getClippingState().transform.position;
+      const displacement = Math.hypot(p.x-position.x, p.y-position.y, p.z-position.z);
+      const step = v.getModelBoundingBox().getSize(v.gumball.object.position.clone()).length() / 200;
+      return displacement / step;
+    }, rotated.transform.position);
+    expect(result).toBeGreaterThan(0);
+    expect(result).toBeCloseTo(Math.round(result), 5);
+  } finally { await app.close(); }
+});
+
+test("real gumball drag stays selected, follows sliders, and Escape restores state", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    await selectClippingWidget(page);
+    await page.locator("#clipper .clip-slider").focus();
+    await page.keyboard.press("ArrowRight");
+    expect(await page.evaluate(() => (window as any).__viewer.gumball.object.visible)).toBe(true);
+    const before = await page.evaluate(() => (window as any).__viewer.getClippingState());
+    const p = await gumballPoint(page, "translate-x");
+    await page.mouse.move(p.x, p.y);
+    await page.mouse.down();
+    expect(await page.evaluate(() => (window as any).__viewer.isDraggingGizmo)).toBe(true);
+    expect(await page.evaluate(() => (window as any).__viewer.world.camera.controls.enabled)).toBe(false);
+    await page.mouse.move(p.x + 40, p.y, { steps: 8 });
+    expect(await page.evaluate(() => (window as any).__viewer.gumball.object.visible)).toBe(true);
+    expect(await page.evaluate(() => (window as any).__viewer.getClippingState().transform.position)).not.toEqual(before.transform.position);
+    await page.keyboard.press("Escape");
+    await page.mouse.up();
+    expect(await page.evaluate(() => (window as any).__viewer.getClippingState())).toEqual(before);
+    expect(await page.evaluate(() => (window as any).__viewer.world.camera.controls.enabled)).toBe(true);
+  } finally { await app.close(); }
+});
+
+test("final release coordinates are applied even without a pointermove", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    await selectClippingWidget(page);
+    const before = await page.evaluate(() => (window as any).__viewer.getClippingState().transform.position.x);
+    const p = await gumballPoint(page, "translate-x");
+    const end = await gumballPoint(page, "translate-x", { x: 0, y: 1.2, z: 0 });
+    await page.mouse.move(p.x, p.y);
+    await page.mouse.down();
+    expect(await page.evaluate(() => (window as any).__viewer.gumball.activeHandle)).toBe("translate-x");
+    await page.evaluate((point) => {
+      const v = (window as any).__viewer;
+      v.world.renderer.three.domElement.dispatchEvent(new PointerEvent("pointerup", {
+        pointerId: v.gumball.pointerId, clientX: point.x, clientY: point.y, button: 0, isPrimary: true,
+      }));
+    }, end);
+    await page.mouse.up();
+    const after = await page.evaluate(() => (window as any).__viewer.getClippingState().transform.position.x);
+    expect(after - before).toBeGreaterThan(0.001);
+  } finally { await app.close(); }
+});
+
+test("the outward normal handle stays visible beyond the cutting plane", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    await page.evaluate(async () => {
+      const v = (window as any).__viewer;
+      const center = v.getModelBoundingBox().getCenter(v.world.camera.three.position.clone());
+      v.setClippingState({ transform: { position: center, rotation: { x: 0, y: 0, z: 0, w: 1 } } });
+      await v.world.camera.controls.setLookAt(center.x + 5, center.y + 5, center.z + 5, center.x, center.y, center.z, false);
+      v.world.camera.controls.update(0);
+      v.world.camera.three.updateMatrixWorld();
+    });
+    await selectClippingWidget(page);
+    const p = await gumballPoint(page, "translate-z");
+    const clip = { x: Math.floor(p.x) - 8, y: Math.floor(p.y) - 8, width: 16, height: 16 };
+    const shown = await page.screenshot({ clip });
+    await page.evaluate(async () => {
+      (window as any).__viewer.gumball.object.visible = false;
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
+    const hidden = await page.screenshot({ clip });
+    expect(shown.equals(hidden), "the cutting plane also clipped its outward gumball handle").toBe(false);
+  } finally { await app.close(); }
+});
+
 const FIXTURE = path.resolve(__dirname, "fixtures/i-beam.ifc");
 
 async function loaded(app: Awaited<ReturnType<typeof launchViewer>>) {
@@ -190,8 +417,7 @@ test("orthogonal axes X and Z clip geometry along their respective directions", 
       viewer.setClippingState({
         enabled: true,
         mode: "plane",
-        axis: "x",
-        planePos: (range.min + range.max) / 2,
+        transform: { position: { x: (range.min + range.max) / 2, y: 0, z: 0 }, rotation: { x: 0, y: -Math.SQRT1_2, z: 0, w: Math.SQRT1_2 } },
       });
     });
     await page.waitForTimeout(500);
@@ -206,8 +432,7 @@ test("orthogonal axes X and Z clip geometry along their respective directions", 
       viewer.setClippingState({
         enabled: true,
         mode: "plane",
-        axis: "z",
-        planePos: (range.min + range.max) / 2,
+        transform: { position: { x: 0, y: 0, z: (range.min + range.max) / 2 }, rotation: { x: 0, y: 0, z: 0, w: 1 } },
       });
     });
     await page.waitForTimeout(500);
@@ -233,9 +458,7 @@ test("inverting the cut direction flips which side of the plane is clipped", asy
       viewer.setClippingState({
         enabled: true,
         mode: "plane",
-        axis: "y",
-        inverted: false,
-        planePos: (range.min + range.max) / 2,
+        transform: { position: { x: 0, y: (range.min + range.max) / 2, z: 0 }, rotation: { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 } },
       });
     });
     await page.waitForTimeout(500);
@@ -244,7 +467,7 @@ test("inverting the cut direction flips which side of the plane is clipped", asy
     // Flip cut direction
     await page.evaluate(() => {
       const viewer = (window as any).__viewer;
-      viewer.setClippingState({ inverted: true });
+      viewer.setClippingState({ transform: { position: viewer.getClippingState().transform.position, rotation: { x: Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 } } });
     });
     await page.waitForTimeout(500);
     const invertedCut = await viewport.screenshot();
@@ -273,9 +496,8 @@ test("slice mode creates two clipping planes", async () => {
       viewer.setClippingState({
         enabled: true,
         mode: "slice",
-        axis: "y",
-        sliceMin: range.min + span * 0.3,
-        sliceMax: range.min + span * 0.7,
+        transform: { position: { x: 0, y: (range.min + range.max) / 2, z: 0 }, rotation: { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 } },
+        sliceDepth: span * 0.4,
       });
     });
     await page.waitForTimeout(500);
@@ -300,8 +522,8 @@ test("section box mode creates 6 clipping planes and fitToSelection shrinks the 
       viewer.setClippingState({
         enabled: true,
         mode: "box",
-        boxMin: { x: box.min.x, y: box.min.y, z: box.min.z },
-        boxMax: { x: box.max.x, y: box.max.y, z: box.max.z },
+        transform: { position: box.getCenter(box.min.clone()), rotation: { x: 0, y: 0, z: 0, w: 1 } },
+        boxSize: box.getSize(box.max.clone()),
       });
     });
     expect(await page.evaluate(() => (window as any).__viewer.debugClippingPlaneCount())).toBe(6);
@@ -328,8 +550,8 @@ test("section box mode creates 6 clipping planes and fitToSelection shrinks the 
       const b = (window as any).__viewer.getModelBoundingBox();
       return { min: b.min, max: b.max };
     });
-    expect(resetState.boxMin.x).toBeCloseTo(modelBounds.min.x, 3);
-    expect(resetState.boxMax.x).toBeCloseTo(modelBounds.max.x, 3);
+    expect(resetState.transform.position.x - resetState.boxSize.x / 2).toBeCloseTo(modelBounds.min.x, 3);
+    expect(resetState.transform.position.x + resetState.boxSize.x / 2).toBeCloseTo(modelBounds.max.x, 3);
   } finally {
     await app.close();
   }
@@ -385,6 +607,8 @@ test("clipper UI renders buttons and interacts with modes", async () => {
     await boxBtn.click();
     expect(await page.evaluate(() => (window as any).__viewer.getClippingState().mode)).toBe("box");
     await expect(page.locator("#section-box-panel")).toBeVisible();
+    await page.evaluate(() => (window as any).__viewer.setClippingState({ mode: "plane" }));
+    await expect(page.locator("#section-box-panel")).toHaveCount(0);
   } finally {
     await app.close();
   }
@@ -409,7 +633,7 @@ test("clipping updates keep the active slider mounted until its drag ends", asyn
 
     await page.evaluate(() => {
       const viewer = (window as any).__viewer;
-      viewer.setClippingState({ planePos: viewer.getClippingState().planePos });
+      viewer.setClippingState({ transform: viewer.getClippingState().transform });
     });
 
     expect(
@@ -425,35 +649,39 @@ test("clipping updates keep the active slider mounted until its drag ends", asyn
   }
 });
 
-test("gizmo dragging defers clipper rendering until the drag ends", async () => {
+test("gumball dragging defers clipper rendering until the drag ends", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
     const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
-    await page.locator("#clipper-toggle").click();
-    await page.getByTitle("Toggle 3D clipping helper wireframes in viewport").click();
-
-    const result = await page.evaluate(() => {
-      const viewer = (window as any).__viewer;
-      const originalSlider = document.querySelector("#clipper .clip-slider");
-      const control = viewer.gizmos[0]?.control;
-      if (!originalSlider || !control) return null;
-
-      control.dispatchEvent({ type: "dragging-changed", value: true });
-      viewer.setClippingState({ planePos: viewer.getClippingState().planePos + 0.01 });
-      const keptDuringDrag = document.querySelector("#clipper .clip-slider") === originalSlider;
-
-      control.dispatchEvent({ type: "dragging-changed", value: false });
-      const refreshedAfterDrag = document.querySelector("#clipper .clip-slider") !== originalSlider;
-      return { keptDuringDrag, refreshedAfterDrag };
-    });
-
-    expect(result).not.toBeNull();
-    expect(result?.keptDuringDrag, "gizmo updates rebuilt the clipper during an active drag").toBe(true);
-    expect(result?.refreshedAfterDrag, "the clipper did not refresh when the gizmo drag ended").toBe(true);
+    await selectClippingWidget(page);
+    await page.locator("#clipper .clip-slider").evaluate(e => { (window as any).__activeClipSlider = e; });
+    const p = await gumballPoint(page, "translate-x");
+    await page.mouse.move(p.x, p.y);
+    await page.mouse.down();
+    await page.mouse.move(p.x + 30, p.y, { steps: 8 });
+    expect(await page.evaluate(() => document.querySelector("#clipper .clip-slider") === (window as any).__activeClipSlider)).toBe(true);
+    await page.mouse.up();
+    expect(await page.evaluate(() => document.querySelector("#clipper .clip-slider") !== (window as any).__activeClipSlider)).toBe(true);
   } finally {
     await app.close();
   }
+});
+
+test("slice and box planes retain their center and reject exterior points", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const distances = await page.evaluate(() => {
+      const v = (window as any).__viewer;
+      return ["slice", "box"].map(mode => {
+        v.setClippingState({ enabled: true, mode, transform: { position: { x: 1, y: 2, z: 3 }, rotation: { x: 0, y: 0, z: 0, w: 1 } }, sliceDepth: 2, boxSize: { x: 2, y: 2, z: 2 } });
+        return v.activePlanes.map((p: any) => p.normal.x + 2 * p.normal.y + 3 * p.normal.z + p.constant);
+      });
+    });
+    for (const modeDistances of distances) for (const distance of modeDistances) expect(distance).toBeCloseTo(1);
+  } finally { await app.close(); }
 });
 
 test("clipping state preserves a freely oriented plane transform", async () => {
@@ -480,343 +708,56 @@ test("clipping state preserves a freely oriented plane transform", async () => {
   }
 });
 
-async function dragVisibleGumballHandle(page: any, handleName: string, delta: { x: number; y: number }, shiftKey = false) {
-  await page.evaluate((args) => {
-      const viewer = (window as any).__viewer;
-      const gumball = viewer.gumball;
-      if (!gumball) return;
-      
-      const handle = gumball.handles.find((h: any) => h.userData.handle === args.name);
-      const oldRaycast = gumball.raycaster.intersectObjects;
-      gumball.raycaster.intersectObjects = () => [{ object: handle }];
-      
-      const eDown = new PointerEvent('pointerdown', { clientX: 100, clientY: 100, pointerId: 1 });
-      gumball.onPointerDown(eDown);
-      
-      gumball.raycaster.intersectObjects = oldRaycast;
-      
-      const eMove = new PointerEvent('pointermove', { clientX: 100 + args.delta.x, clientY: 100 + args.delta.y, pointerId: 1 });
-      gumball.onPointerMove(eMove);
-      
-      const eUp = new PointerEvent('pointerup', { pointerId: 1 });
-      gumball.onPointerUp(eUp);
-      
-  }, { name: handleName, delta });
-}
-
-test("dragging a gumball translation handle updates the clipping transform", async ({ page }) => {
+test("real scale drag updates box dimensions and synchronizes the footer", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
-    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
-    const result = await page.evaluate(() => {
-      const viewer = (window as any).__viewer;
-      viewer.setClippingPlane(true, 5);
-      
-      const gumball = new (window as any).ClippingGumball({
-          camera: viewer.world.camera.three,
-          domElement: viewer.world.renderer.three.domElement,
-          scene: viewer.world.scene.three,
-          onStart: () => { viewer.gumballDragging = true; },
-          onChange: (t: any) => { viewer.setClippingState({ transform: { position: t.position.clone(), rotation: { x: t.quaternion.x, y: t.quaternion.y, z: t.quaternion.z, w: t.quaternion.w } } } as any); },
-          onEnd: () => { viewer.gumballDragging = false; viewer.onClippingChanged.emit(viewer.clipState); },
-          onCancel: () => {}
-      });
-
-      const state = viewer.getClippingState().transform;
-      const before = { position: { x: state.position.x, y: state.position.y, z: state.position.z }, rotation: { ...state.rotation } };
-
-      gumball.object.position.y += 80;
-      gumball.options.onChange(gumball.object);
-
-      const stateAfter = viewer.getClippingState().transform;
-      const after = { position: { x: stateAfter.position.x, y: stateAfter.position.y, z: stateAfter.position.z }, rotation: { ...stateAfter.rotation } };
-      return { before: { y: before.position.y }, after: { y: after.position.y } };
-    });
-    expect(result.after.y).not.toBeCloseTo(result.before.y, 3);
-  } finally {
-    await app.close();
-  }
+    const page = await loaded(app);
+    await page.evaluate(() => (window as any).__viewer.setClippingState({ mode: "box" }));
+    await selectClippingWidget(page);
+    await page.getByTitle("Open 3D Section Box sliders panel").click();
+    const before = await page.evaluate(() => (window as any).__viewer.getClippingState());
+    const p = await gumballPoint(page, "scale-x");
+    const target = await gumballPoint(page, "scale-x", { x: 0, y: 0.9, z: 0 });
+    await page.mouse.move(p.x, p.y);
+    await page.mouse.down();
+    expect(await page.evaluate(() => (window as any).__viewer.isDraggingGizmo)).toBe(true);
+    expect(await page.evaluate(() => (window as any).__viewer.gumball.activeHandle)).toBe("scale-x");
+    await page.mouse.move(target.x, target.y, { steps: 8 });
+    await page.mouse.up();
+    const after = await page.evaluate(() => (window as any).__viewer.getClippingState());
+    expect(after.boxSize.x).not.toBeCloseTo(before.boxSize.x, 5);
+    expect(after.boxSize.y).toBe(before.boxSize.y);
+    expect(after.transform.rotation).toEqual(before.transform.rotation);
+    expect(Number(await page.locator(".box-slider").first().inputValue())).toBeCloseTo(after.boxSize.x, 3);
+    await page.evaluate(() => (window as any).__viewer.unloadIfc());
+    expect(await page.evaluate(() => Boolean((window as any).__viewer.gumball))).toBe(false);
+  } finally { await app.close(); }
 });
 
-test("gumball rotation changes the quaternion", async ({ page }) => {
-  test.setTimeout(180_000);
-  const app = await launchViewer();
-  try {
-    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
-    const result = await page.evaluate(() => {
-      const viewer = (window as any).__viewer;
-      viewer.setClippingPlane(true, 5);
-      
-      const gumball = new (window as any).ClippingGumball({
-          camera: viewer.world.camera.three,
-          domElement: viewer.world.renderer.three.domElement,
-          scene: viewer.world.scene.three,
-          onStart: () => { viewer.gumballDragging = true; },
-          onChange: (t: any) => { viewer.setClippingState({ transform: { position: t.position.clone(), rotation: { x: t.quaternion.x, y: t.quaternion.y, z: t.quaternion.z, w: t.quaternion.w } } } as any); },
-          onEnd: () => { viewer.gumballDragging = false; viewer.onClippingChanged.emit(viewer.clipState); },
-          onCancel: () => {}
-      });
-
-      const state = viewer.getClippingState().transform;
-      const before = { position: { x: state.position.x, y: state.position.y, z: state.position.z }, rotation: { ...state.rotation } };
-
-      gumball.object.quaternion.x += 0.5;
-      gumball.options.onChange(gumball.object);
-
-      const stateAfter = viewer.getClippingState().transform;
-      const after = { position: { x: stateAfter.position.x, y: stateAfter.position.y, z: stateAfter.position.z }, rotation: { ...stateAfter.rotation } };
-      return { before: { x: before.rotation.x }, after: { x: after.rotation.x } };
-    });
-    expect(result.after.x).not.toBeCloseTo(result.before.x, 3);
-  } finally {
-    await app.close();
-  }
-});
-
-test("gumball cancel restores snapshot", async ({ page }) => {
-  test.setTimeout(180_000);
-  const app = await launchViewer();
-  try {
-    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
-    const result = await page.evaluate(() => {
-      const viewer = (window as any).__viewer;
-      viewer.setClippingPlane(true, 5);
-      
-      const gumball = new (window as any).ClippingGumball({
-          camera: viewer.world.camera.three,
-          domElement: viewer.world.renderer.three.domElement,
-          scene: viewer.world.scene.three,
-          onStart: () => { viewer.gumballDragging = true; },
-          onChange: (t: any) => { viewer.setClippingState({ transform: { position: t.position.clone(), rotation: { x: t.quaternion.x, y: t.quaternion.y, z: t.quaternion.z, w: t.quaternion.w } } } as any); },
-          onEnd: () => { viewer.gumballDragging = false; viewer.onClippingChanged.emit(viewer.clipState); },
-          onCancel: (t: any) => { viewer.gumballDragging = false; viewer.setClippingState({ transform: { position: t.position.clone(), rotation: { x: t.quaternion.x, y: t.quaternion.y, z: t.quaternion.z, w: t.quaternion.w } } } as any); viewer.onClippingChanged.emit(viewer.clipState); }
-      });
-
-      const state = viewer.getClippingState().transform;
-      const before = { position: { x: state.position.x, y: state.position.y, z: state.position.z }, rotation: { ...state.rotation } };
-
-      gumball.snapshot = { position: gumball.object.position.clone(), quaternion: gumball.object.quaternion.clone(), scale: gumball.object.scale.clone() };
-      gumball.object.position.x += 5;
-      gumball.options.onChange(gumball.object);
-
-      const stateInt = viewer.getClippingState().transform;
-      const intermediate = { position: { x: stateInt.position.x, y: stateInt.position.y, z: stateInt.position.z }, rotation: { ...stateInt.rotation } };
-      
-      gumball.options.onCancel(gumball.snapshot);
-      
-      const stateAfter = viewer.getClippingState().transform;
-      const after = { position: { x: stateAfter.position.x, y: stateAfter.position.y, z: stateAfter.position.z }, rotation: { ...stateAfter.rotation } };
-      
-      return { before: { x: before.position.x }, intermediate: { x: intermediate.position.x }, after: { x: after.position.x } };
-    });
-    
-    expect(result.intermediate.x).not.toBeCloseTo(result.before.x, 3);
-    expect(result.after.x).toBeCloseTo(result.before.x, 5);
-  } finally {
-    await app.close();
-  }
-});
-
-test("footer controls translate plane along local normal", async ({ page }) => {
-  test.setTimeout(180_000);
-  const app = await launchViewer();
-  try {
-    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
-    const result = await page.evaluate(() => {
-      const viewer = (window as any).__viewer;
-      viewer.setClippingState({
-        enabled: true,
-        mode: "plane",
-        transform: {
-          position: { x: 0, y: 0, z: 0 },
-          rotation: { x: 0.5, y: 0, z: 0, w: 0.8660254 } // rotated some amount
-        }
-      });
-      // Force UI render manually since E2E mock doesn't always trigger resize
-      const clipper = document.getElementById("clipper");
-      const slider = clipper.querySelector('input[type="range"]') as HTMLInputElement;
-      
-      const before = { ...viewer.getClippingState().transform };
-      before.position = { ...before.position };
-      before.rotation = { ...before.rotation };
-
-      // Change offset slider
-      slider.value = String(Number(slider.value) + 5);
-      slider.dispatchEvent(new Event('input'));
-      
-      const after = { ...viewer.getClippingState().transform };
-      after.position = { ...after.position };
-      after.rotation = { ...after.rotation };
-
-      return { before, after };
-    });
-    // Expected: position moved along normal, rotation stayed exactly the same
-    expect(result.after.position).not.toEqual(result.before.position);
-    expect(result.after.rotation).toEqual(result.before.rotation);
-  } finally {
-    await app.close();
-  }
-});
-
-test("footer controls update slice depth without resetting rotation", async ({ page }) => {
-  test.setTimeout(180_000);
-  const app = await launchViewer();
-  try {
-    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
-    const result = await page.evaluate(() => {
-      const viewer = (window as any).__viewer;
-      viewer.setClippingState({
-        enabled: true,
-        mode: "slice",
-        transform: {
-          position: { x: 0, y: 0, z: 0 },
-          rotation: { x: 0.5, y: 0, z: 0, w: 0.8660254 }
-        },
-        sliceDepth: 5
-      });
-      
-      const clipper = document.getElementById("clipper");
-      // Grab depth slider (second slider in slice mode)
-      const sliders = clipper.querySelectorAll('input[type="range"]');
-      const depthSlider = sliders[1] as HTMLInputElement;
-      
-      const before = viewer.getClippingState().sliceDepth;
-
-      depthSlider.value = String(Number(depthSlider.value) + 3);
-      depthSlider.dispatchEvent(new Event('input'));
-      
-      const afterState = viewer.getClippingState();
-      
-      return { before, afterDepth: afterState.sliceDepth, afterRot: afterState.transform.rotation };
-    });
-    
-    expect(result.afterDepth).not.toBe(result.before);
-    expect(result.afterRot.w).toBeCloseTo(0.866, 3);
-  } finally {
-    await app.close();
-  }
-});
-
-test("footer controls update box dimension without resetting rotation", async ({ page }) => {
-  test.setTimeout(180_000);
-  const app = await launchViewer();
-  try {
-    const page = await loaded(app); page.on('console', msg => console.log('BROWSER:', msg.text()));
-    const result = await page.evaluate(() => {
-      const viewer = (window as any).__viewer;
-      viewer.setClippingState({
-        enabled: true,
-        mode: "box",
-        transform: {
-          position: { x: 0, y: 0, z: 0 },
-          rotation: { x: 0.5, y: 0, z: 0, w: 0.8660254 }
-        },
-        boxSize: { x: 10, y: 10, z: 10 }
-      });
-      
-      // Need to open box panel
-      const panelBtn = document.getElementById("clipper").querySelector('button[title*="Open"]') as HTMLButtonElement;
-      panelBtn.click();
-      
-      const panel = document.getElementById("section-box-panel");
-      const sliders = panel.querySelectorAll('input[type="range"]');
-      const widthSlider = sliders[0] as HTMLInputElement; // X width slider
-      
-      const before = viewer.getClippingState().boxSize.x;
-
-      widthSlider.value = String(Number(widthSlider.value) + 5);
-      widthSlider.dispatchEvent(new Event('input'));
-      
-      const afterState = viewer.getClippingState();
-      
-      return { before, afterSize: afterState.boxSize.x, afterRot: afterState.transform.rotation };
-    });
-    
-    expect(result.afterSize).not.toBe(result.before);
-    expect(result.afterRot.w).toBeCloseTo(0.866, 3);
-  } finally {
-    await app.close();
-  }
-});
-
-test("lifecycle: toggling helper keeps object counts stable", async ({ page }) => {
+test("clipping updates reuse helper geometry and registered planes", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
   try {
     const page = await loaded(app);
     const result = await page.evaluate(() => {
-      const viewer = (window as any).__viewer;
-      viewer.setClippingState({ enabled: true, mode: "box", showHelper: true });
-      
-      const count1 = viewer.clippingHelpersGroup.children.length;
-      viewer.setClippingState({ showHelper: false });
-      const count2 = viewer.clippingHelpersGroup.children.length;
-      viewer.setClippingState({ showHelper: true });
-      const count3 = viewer.clippingHelpersGroup.children.length;
-      
-      return { count1, count2, count3 };
-    });
-    
-    // In box mode there are 6 planes + 1 box outline
-    expect(result.count1).toBeGreaterThan(0);
-    expect(result.count2).toBe(0);
-    expect(result.count3).toBe(result.count1);
-  } finally {
-    await app.close();
-  }
-});
-
-test("lifecycle: cancelling drag restores camera controls", async ({ page }) => {
-  test.setTimeout(180_000);
-  const app = await launchViewer();
-  try {
-    const page = await loaded(app);
-    const result = await page.evaluate(() => {
-      const viewer = (window as any).__viewer;
-      viewer.setClippingState({ enabled: true, mode: "plane" });
-      
-      if (viewer.gumball) {
-        viewer.gumball.options.onStart();
-        viewer.gumball.options.onCancel(viewer.gumball.object);
+      const v = (window as any).__viewer;
+      v.setClippingState({ enabled: true, showHelper: true });
+      const widgets = [...v.activeWidgets];
+      const planes = [...v.activePlanes];
+      for (let i = 0; i < 20; i++) {
+        const state = v.getClippingState();
+        state.transform.position.y += 0.001;
+        v.setClippingState({ transform: state.transform });
       }
-      
-      return viewer.world.camera.controls.enabled;
+      v.setClippingState({ showHelper: true });
+      const reused = widgets[0] === v.activeWidgets[0];
+      const planesReused = planes[0] === v.activePlanes[0];
+      v.setClippingState({ enabled: false });
+      return { reused, planesReused, count: v.debugClippingPlaneCount() };
     });
-    
-    expect(result).toBe(true);
-  } finally {
-    await app.close();
-  }
-});
-
-test("lifecycle: model unload cleans up gumball", async ({ page }) => {
-  test.setTimeout(180_000);
-  const app = await launchViewer();
-  try {
-    const page = await loaded(app);
-    const result = await page.evaluate(() => {
-      const viewer = (window as any).__viewer;
-      viewer.setClippingState({ enabled: true, mode: "plane" });
-      
-      // Select something to attach gumball
-      viewer.selectedWidget = { mode: "plane", index: 0 };
-      viewer.syncClippingPlanes();
-      
-      viewer.unloadIfc();
-      
-      return {
-        hasGumball: !!viewer.gumball,
-        attached: !!(viewer.gumball && viewer.gumball.object.parent !== null),
-        dragging: viewer.gumballDragging,
-        helpers: viewer.clippingHelpersGroup.children.length
-      };
-    });
-    
-    expect(result.attached).toBe(false);
-    expect(result.dragging).toBe(false);
-    expect(result.helpers).toBe(0);
-  } finally {
-    await app.close();
-  }
+    expect(result.reused).toBe(true);
+    expect(result.planesReused).toBe(true);
+    expect(result.count).toBe(0);
+  } finally { await app.close(); }
 });

@@ -1,4 +1,5 @@
-import type { ClipAxis, ClipMode, Viewer } from "../viewer";
+import type { ClipMode, Viewer } from "../viewer";
+import { Quaternion, Vector3 } from "three";
 
 export function mountClipper(viewer: Viewer): void {
   const root = document.getElementById("clipper")!;
@@ -22,12 +23,20 @@ export function mountClipper(viewer: Viewer): void {
   });
 
   let isSliderInteraction = false;
+  let isKeyboardInteraction = false;
 
   function finishSliderInteraction() {
     if (!isSliderInteraction) return;
+    const focused = document.activeElement;
+    const sliders = [...root.querySelectorAll<HTMLInputElement>('input[type="range"]'), ...boxPanel?.querySelectorAll<HTMLInputElement>('input[type="range"]') ?? []];
+    const focusedIndex = sliders.indexOf(focused as HTMLInputElement);
     isSliderInteraction = false;
+    isKeyboardInteraction = false;
     render();
-    if (boxPanelOpen) renderBoxPanel();
+    if (focusedIndex >= 0) {
+      const nextSliders = [...root.querySelectorAll<HTMLInputElement>('input[type="range"]'), ...boxPanel?.querySelectorAll<HTMLInputElement>('input[type="range"]') ?? []];
+      nextSliders[focusedIndex]?.focus({ preventScroll: true });
+    }
   }
 
   function trackSliderInteraction(slider: HTMLInputElement) {
@@ -36,21 +45,20 @@ export function mountClipper(viewer: Viewer): void {
     });
     slider.addEventListener("keydown", () => {
       isSliderInteraction = true;
+      isKeyboardInteraction = true;
     });
     slider.addEventListener("keyup", finishSliderInteraction);
-    slider.addEventListener("input", finishSliderInteraction);
+    slider.addEventListener("change", () => { if (!isKeyboardInteraction) finishSliderInteraction(); });
     slider.addEventListener("blur", finishSliderInteraction);
   }
 
   window.addEventListener("pointerup", finishSliderInteraction);
   window.addEventListener("pointercancel", finishSliderInteraction);
+  window.addEventListener("blur", finishSliderInteraction);
 
   viewer.onClippingChanged.on(() => {
     if (isSliderInteraction || viewer.isDraggingGizmo) return;
     render();
-    if (boxPanelOpen) {
-      renderBoxPanel();
-    }
   });
 
   viewer.onSelection.on(() => {
@@ -73,6 +81,10 @@ export function mountClipper(viewer: Viewer): void {
 
   function render() {
     const state = viewer.getClippingState();
+    if (state.mode !== "box") {
+      removeBoxPanel();
+      boxPanelOpen = false;
+    }
     root.innerHTML = "";
 
     // 1. Primary Toggle
@@ -84,16 +96,7 @@ export function mountClipper(viewer: Viewer): void {
     toggleBtn.addEventListener("click", () => {
       const nextEnabled = !state.enabled;
       if (nextEnabled) {
-        const bounds = viewer.getModelBoundingBox();
-        if (bounds) {
-          const centerY = (bounds.min.y + bounds.max.y) / 2;
-          viewer.setClippingState({
-            enabled: true,
-            planePos: (state as any).planePos || centerY,
-          } as any);
-        } else {
-          viewer.setClippingState({ enabled: true });
-        }
+        viewer.setClippingState({ enabled: true });
       } else {
         viewer.setClippingState({ enabled: false });
         removeBoxPanel();
@@ -158,21 +161,15 @@ export function mountClipper(viewer: Viewer): void {
   }
 
 
-  // Helper math to avoid Three.js dependency
-  function getNormal(rot: {x:number, y:number, z:number, w:number}) {
-    // Rotates (0, 0, -1) by quaternion
-    const x = rot.x, y = rot.y, z = rot.z, w = rot.w;
-    return {
-      x: -2 * (x * z + y * w),
-      y: -2 * (y * z - x * w),
-      z: -(1 - 2 * (x * x + y * y))
-    };
+  function getNormal(rot: {x:number, y:number, z:number, w:number}, axis: "x" | "y" | "z" = "z") {
+    return new Vector3(axis === "x" ? 1 : 0, axis === "y" ? 1 : 0, axis === "z" ? 1 : 0)
+      .applyQuaternion(new Quaternion(rot.x, rot.y, rot.z, rot.w));
   }
 
-  function getProjectedRange(rot: {x:number, y:number, z:number, w:number}) {
+  function getProjectedRange(rot: {x:number, y:number, z:number, w:number}, axis: "x" | "y" | "z" = "z") {
     const bounds = viewer.getModelBoundingBox();
     if (!bounds) return { min: -10, max: 10 };
-    const n = getNormal(rot);
+    const n = getNormal(rot, axis);
     const corners = [
       {x: bounds.min.x, y: bounds.min.y, z: bounds.min.z},
       {x: bounds.max.x, y: bounds.min.y, z: bounds.min.z},
@@ -198,7 +195,7 @@ export function mountClipper(viewer: Viewer): void {
     
     // X, Y, Z presets
     const presets = [
-      { id: "X", rot: { x: 0, y: -Math.SQRT1_2, z: 0, w: Math.SQRT1_2 } },
+      { id: "X", rot: { x: 0, y: Math.SQRT1_2, z: 0, w: Math.SQRT1_2 } },
       { id: "Y", rot: { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 } },
       { id: "Z", rot: { x: 0, y: 0, z: 0, w: 1 } }
     ];
@@ -239,9 +236,9 @@ export function mountClipper(viewer: Viewer): void {
 
     const slider = document.createElement("input");
     slider.type = "range";
-    slider.className = "clip-slider";
-    slider.min = String(range.min);
-    slider.max = String(range.max);
+    slider.className = "clip-slider clip-slider-min";
+    slider.min = String(Math.min(range.min, currentOffset));
+    slider.max = String(Math.max(range.max, currentOffset));
     slider.step = step;
     slider.value = String(currentOffset);
     trackSliderInteraction(slider);
@@ -253,8 +250,11 @@ export function mountClipper(viewer: Viewer): void {
     slider.addEventListener("input", () => {
       const val = parseFloat(slider.value);
       valSpan.textContent = `${val.toFixed(2)}m`;
-      const p = { x: n.x * val, y: n.y * val, z: n.z * val };
-      viewer.setClippingState({ transform: { position: p, rotation: state.transform.rotation } } as any);
+      const current = viewer.getClippingState().transform;
+      const offset = current.position.x * n.x + current.position.y * n.y + current.position.z * n.z;
+      const delta = val - offset;
+      const p = { x: current.position.x + n.x * delta, y: current.position.y + n.y * delta, z: current.position.z + n.z * delta };
+      viewer.setClippingState({ transform: { position: p, rotation: current.rotation } });
     });
 
     root.appendChild(slider);
@@ -274,8 +274,8 @@ export function mountClipper(viewer: Viewer): void {
     const depthSlider = document.createElement("input");
     depthSlider.type = "range";
     depthSlider.className = "clip-slider clip-slider-max";
-    depthSlider.min = "0.01";
-    depthSlider.max = String(span);
+    depthSlider.min = "0.001";
+    depthSlider.max = String(Math.max(span, state.sliceDepth));
     depthSlider.step = String(span / 200);
     depthSlider.value = String(state.sliceDepth || span / 2);
     trackSliderInteraction(depthSlider);
@@ -314,8 +314,7 @@ export function mountClipper(viewer: Viewer): void {
     fitBtn.textContent = "Fit Selection";
     fitBtn.disabled = !viewer.getSelection();
     fitBtn.addEventListener("click", async () => {
-      const ok = await viewer.fitSectionBoxToSelection(0.4);
-      if (ok && boxPanelOpen) renderBoxPanel();
+      await viewer.fitSectionBoxToSelection(0.4);
     });
     root.appendChild(fitBtn);
 
@@ -324,7 +323,6 @@ export function mountClipper(viewer: Viewer): void {
     resetBtn.textContent = "Reset Box";
     resetBtn.addEventListener("click", () => {
       viewer.resetSectionBox();
-      if (boxPanelOpen) renderBoxPanel();
     });
     root.appendChild(resetBtn);
 
@@ -366,11 +364,10 @@ export function mountClipper(viewer: Viewer): void {
       { id: "Z", key: "z" as const }
     ];
 
-    const bounds = viewer.getModelBoundingBox();
-    const span = bounds ? Math.max(bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y, bounds.max.z - bounds.min.z) : 10;
-    const step = String(span / 200);
-
     for (const d of dims) {
+      const range = getProjectedRange(state.transform.rotation, d.key);
+      const span = range.max - range.min || 1;
+      const step = String(span / 200);
       const row = document.createElement("div");
       row.className = "box-row";
 
@@ -386,8 +383,8 @@ export function mountClipper(viewer: Viewer): void {
       const slider = document.createElement("input");
       slider.type = "range";
       slider.className = "box-slider";
-      slider.min = "0.01";
-      slider.max = String(span * 2);
+      slider.min = "0.001";
+      slider.max = String(Math.max(span * 2, state.boxSize[d.key]));
       slider.step = step;
       slider.value = String(state.boxSize[d.key] || span);
       trackSliderInteraction(slider);
@@ -395,7 +392,7 @@ export function mountClipper(viewer: Viewer): void {
       slider.addEventListener("input", () => {
         const val = parseFloat(slider.value);
         valSpan.textContent = `${val.toFixed(2)}m`;
-        const updated = { ...state.boxSize, [d.key]: val };
+        const updated = { ...viewer.getClippingState().boxSize, [d.key]: val };
         viewer.setClippingState({ boxSize: updated } as any);
       });
 
