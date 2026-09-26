@@ -257,9 +257,9 @@ export class Viewer {
       if (event.key === "Escape" && !this.gumballDragging) {
         this.selectedWidget = null;
         this.activeWidgets.forEach(widget => {
-          const material = widget.material as THREE.MeshBasicMaterial;
-          material.color.setHex(0xf0883e);
-          material.opacity = 0.2;
+          const material = widget.material as THREE.MeshStandardMaterial;
+          material.color.setHex(0x7996ad);
+          material.opacity = 0.15;
         });
         this.gumball?.detach();
       }
@@ -1391,9 +1391,9 @@ export class Viewer {
       
       this.selectedWidget = hits[0]!.object as THREE.Mesh;
       this.activeWidgets.forEach((w: any) => {
-         const mat = w.material as THREE.MeshBasicMaterial;
-         mat.color.setHex(w === this.selectedWidget ? 0xffaa00 : 0xf0883e);
-         mat.opacity = w === this.selectedWidget ? 0.6 : 0.2;
+         const mat = w.material as THREE.MeshStandardMaterial;
+         mat.color.setHex(w === this.selectedWidget ? 0xf3b56d : 0x7996ad);
+         mat.opacity = w === this.selectedWidget ? 0.3 : 0.15;
       });
       if (!this.gumball) {
          this.gumball = new ClippingGumball({
@@ -1468,9 +1468,9 @@ export class Viewer {
     } else {
       this.selectedWidget = null;
       this.activeWidgets.forEach((w: any) => {
-         const mat = w.material as THREE.MeshBasicMaterial;
-         mat.color.setHex(0xf0883e);
-         mat.opacity = 0.2;
+         const mat = w.material as THREE.MeshStandardMaterial;
+         mat.color.setHex(0x7996ad);
+         mat.opacity = 0.15;
       });
       if (this.gumball) this.gumball.detach();
     }
@@ -1574,7 +1574,7 @@ export class Viewer {
   }
 
   /**
-   * Cleans up 3D wireframe helpers.
+   * Cleans up translucent clipping helpers.
    */
   private clearClippingHelpers(): void {
     this.selectedWidget = null;
@@ -1629,14 +1629,21 @@ export class Viewer {
          return existing;
        }
        const geo = new THREE.PlaneGeometry(1, 1);
-       const mat = new THREE.MeshBasicMaterial({ color: 0xf0883e, side: THREE.DoubleSide, transparent: true, opacity: 0.2, depthWrite: false });
+       const mat = new THREE.MeshStandardMaterial({ color: 0x7996ad, side: THREE.DoubleSide, transparent: true, opacity: 0.15, depthWrite: false, roughness: 1, metalness: 0 });
        const mesh = new THREE.Mesh(geo, mat);
        mesh.position.copy(center);
        mesh.quaternion.copy(q);
        mesh.scale.set(w, h, 1);
        
        const edges = new THREE.EdgesGeometry(geo);
-       const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xf0883e }));
+       const outlineMaterial = new THREE.LineBasicMaterial({ color: 0x7996ad, transparent: true, opacity: 0.35, depthWrite: false });
+       // Model clipping must not cut away the faces used to edit its bounds.
+       for (const material of [mat, outlineMaterial]) {
+         material.onBeforeCompile = shader => {
+           shader.fragmentShader = shader.fragmentShader.replace("#include <clipping_planes_fragment>", "");
+         };
+       }
+       const line = new THREE.LineSegments(edges, outlineMaterial);
        mesh.add(line);
        
        this.clippingHelpersGroup.add(mesh);
@@ -1712,9 +1719,9 @@ export class Viewer {
     }
     
     if (this.selectedWidget && this.activeWidgets.includes(this.selectedWidget)) {
-        const mat = this.selectedWidget.material as THREE.MeshBasicMaterial;
-        mat.color.setHex(0xffaa00);
-        mat.opacity = 0.6;
+        const mat = this.selectedWidget.material as THREE.MeshStandardMaterial;
+        mat.color.setHex(0xf3b56d);
+        mat.opacity = 0.3;
         this.gumball?.update({ position: this.selectedWidget.position.clone(), quaternion: quat, scale: new THREE.Vector3(1, 1, 1) });
     } else {
         this.selectedWidget = null;

@@ -735,6 +735,53 @@ test("real scale drag updates box dimensions and synchronizes the footer", async
   } finally { await app.close(); }
 });
 
+test("clipping helpers use softly shaded translucent faces and subdued outlines", async ({}, testInfo) => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    for (const mode of ["plane", "slice", "box"] as const) {
+      const materials = await page.evaluate(mode => {
+        const v = (window as any).__viewer;
+        v.setClippingState({ enabled: true, showHelper: true, mode });
+        return v.activeWidgets.map((widget: any) => ({
+          shaded: Boolean(widget.material.isMeshStandardMaterial),
+          transparent: widget.material.transparent,
+          opacity: widget.material.opacity,
+          depthWrite: widget.material.depthWrite,
+          outlineTransparent: widget.children[0].material.transparent,
+          outlineOpacity: widget.children[0].material.opacity,
+        }));
+      }, mode);
+      expect(materials).toHaveLength(mode === "plane" ? 1 : mode === "slice" ? 2 : 6);
+      for (const material of materials) {
+        expect(material.shaded).toBe(true);
+        expect(material.transparent).toBe(true);
+        expect(material.opacity).toBeGreaterThan(0);
+        expect(material.opacity).toBeLessThanOrEqual(0.2);
+        expect(material.depthWrite).toBe(false);
+        expect(material.outlineTransparent).toBe(true);
+        expect(material.outlineOpacity).toBeGreaterThan(0);
+        expect(material.outlineOpacity).toBeLessThanOrEqual(0.4);
+      }
+      const shown = await page.locator("#viewport").screenshot({ path: testInfo.outputPath(`shaded-${mode}.png`) });
+      await testInfo.attach(`shaded-${mode}`, { body: shown, contentType: "image/png" });
+      await page.evaluate(() => { (window as any).__viewer.clippingHelpersGroup.visible = false; });
+      const hidden = await page.locator("#viewport").screenshot();
+      expect(shown.equals(hidden), `${mode} helper did not render`).toBe(false);
+      await page.evaluate(() => { (window as any).__viewer.clippingHelpersGroup.visible = true; });
+    }
+    await page.evaluate(() => (window as any).__viewer.setClippingState({ mode: "plane" }));
+    await selectClippingWidget(page);
+    const selectedOpacity = await page.evaluate(() => (window as any).__viewer.selectedWidget.material.opacity);
+    expect(selectedOpacity).toBeGreaterThan(0.2);
+    expect(selectedOpacity).toBeLessThanOrEqual(0.35);
+    await testInfo.attach("shaded-selected", { body: await page.screenshot({ path: testInfo.outputPath("shaded-selected.png") }), contentType: "image/png" });
+    await page.keyboard.press("Escape");
+    expect(await page.evaluate(() => (window as any).__viewer.activeWidgets[0].material.opacity)).toBeLessThanOrEqual(0.2);
+  } finally { await app.close(); }
+});
+
 test("clipping updates reuse helper geometry and registered planes", async () => {
   test.setTimeout(180_000);
   const app = await launchViewer();
