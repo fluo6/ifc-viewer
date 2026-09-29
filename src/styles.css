@@ -74,6 +74,20 @@ body {
   width: 280px;
 }
 
+.property-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  color: #c9d1d9;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+}
+
 #viewport {
   position: relative;
   background: #1a1f26;

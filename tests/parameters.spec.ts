@@ -106,9 +106,66 @@ test("panel shows profile, extrusion, geometry and material", async () => {
   expect(rows["Pset_BeamCommon/Reference"]).toBe("200UB25.4");
 });
 
+test("filters property names and values without losing focus or the query", async () => {
+  const ids = await page.evaluate(() => {
+    const categories = (window as any).__viewer.getCategories();
+    return { beam: categories.get("IFCBEAM")[0], site: categories.get("IFCSITE")[0] };
+  });
+  const panel = page.locator("#properties");
+  await page.evaluate(id => {
+    (window as any).__viewer.onSelection.emit({ fragmentId: "test", expressId: id });
+  }, ids.beam);
+  await expect(panel).toContainText(`#${ids.beam}`);
+  const search = panel.getByRole("searchbox", { name: "Search properties" });
+  await expect(search).toBeVisible();
+
+  await search.focus();
+  await search.pressSequentially("oVeRaLlWiDtH");
+  await expect(search).toBeFocused();
+  await expect(panel.locator("details summary")).toHaveText(["IfcShapeProfile"]);
+  await expect(panel.locator("details")).toContainText("OverallWidth");
+  await expect(panel.locator("details")).toContainText("133 mm");
+  await expect(panel.locator("details")).not.toContainText("OverallDepth");
+
+  await search.fill("steel_grade_300");
+  await expect(panel.locator("details summary")).toHaveText(["IfcMaterial"]);
+  await expect(panel.locator("details")).toContainText("Steel_Grade_300");
+
+  await search.fill("not-a-property");
+  await expect(panel).toContainText("No matching properties");
+  await expect(panel).toContainText(`#${ids.beam}`);
+  await page.evaluate(id => {
+    (window as any).__viewer.onSelection.emit({ fragmentId: "test", expressId: id });
+  }, ids.site);
+  await expect(search).toHaveValue("not-a-property");
+  await expect(panel).toContainText(`#${ids.site}`);
+  await page.evaluate(id => {
+    (window as any).__viewer.onSelection.emit({ fragmentId: "test", expressId: id });
+  }, ids.beam);
+  await expect(search).toHaveValue("not-a-property");
+  await expect(panel).toContainText(`#${ids.beam}`);
+
+  await search.fill("");
+  await expect(panel.locator("details summary")).toHaveCount(7);
+});
+
 test("clears the panel when the model is unloaded", async () => {
+  await page.getByRole("searchbox", { name: "Search properties" }).fill("width");
   await page.evaluate(() => (window as any).__viewer.unloadIfc());
   await expect(page.locator("#properties")).toContainText(
     "Click an element to inspect",
   );
+  await expect(page.getByRole("searchbox", { name: "Search properties" })).toHaveValue("");
+});
+
+test("keeps the no-parameters explanation while filtering an empty element", async () => {
+  const panel = page.locator("#properties");
+  await page.evaluate(() => {
+    const viewer = (window as any).__viewer;
+    viewer.unloadIfc();
+    viewer.onSelection.emit({ fragmentId: "test", expressId: 999999 });
+  });
+  await expect(panel).toContainText("No parameters available for this element.");
+  await panel.getByRole("searchbox", { name: "Search properties" }).fill("width");
+  await expect(panel).toContainText("No parameters available for this element.");
 });

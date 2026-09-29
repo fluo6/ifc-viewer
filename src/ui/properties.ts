@@ -3,6 +3,15 @@ import type { ElementParameters, ParamGroup, Viewer } from "../viewer";
 
 export function mountProperties(viewer: Viewer): void {
   const root = document.getElementById("properties")!;
+  const search = document.createElement("input");
+  search.type = "search";
+  search.className = "property-search";
+  search.placeholder = "Search names or values";
+  search.setAttribute("aria-label", "Search properties");
+  const results = document.createElement("div");
+  root.replaceChildren(search, results);
+  let current: { expressId: number; name: string; ifcClass: string; groups: ParamGroup[]; unavailable: boolean } | null = null;
+  search.addEventListener("input", () => { if (current) draw(); });
   // Bumped by every selection and by unload. The panel is only repainted by
   // the render that still owns the current generation -- lookups are async, so
   // without this an earlier, slower render can resolve last and repaint the
@@ -12,6 +21,7 @@ export function mountProperties(viewer: Viewer): void {
 
   viewer.onModelUnloaded.on(() => {
     generation++;
+    search.value = "";
     reset();
   });
 
@@ -21,7 +31,8 @@ export function mountProperties(viewer: Viewer): void {
       reset();
       return;
     }
-    root.innerHTML = `<div class="muted" style="padding:8px">loading…</div>`;
+    current = null;
+    results.replaceChildren(note("loading…"));
 
     // Preferred path: the raw-IFC reader, which sees the geometry
     // representation (profile dimensions, extrusion, placement) that the
@@ -54,10 +65,8 @@ export function mountProperties(viewer: Viewer): void {
       String(propertyValue(direct, "Name") ?? "(unnamed)"),
       String(direct?.type ?? "Element"),
       groups,
+      !direct && !psets.length,
     );
-    if (!direct && !psets.length) {
-      root.appendChild(note("No parameters available for this element."));
-    }
   });
 
   function render(
@@ -65,14 +74,34 @@ export function mountProperties(viewer: Viewer): void {
     name: string,
     ifcClass: string,
     groups: ParamGroup[],
+    unavailable = false,
   ) {
-    root.innerHTML = "";
-    root.appendChild(renderHeader(expressId, name, ifcClass));
-    for (const group of groups) root.appendChild(renderGroup(group));
+    current = { expressId, name, ifcClass, groups, unavailable };
+    draw();
+  }
+
+  function draw() {
+    if (!current) return;
+    const { expressId, name, ifcClass, groups } = current;
+    const query = search.value.trim().toLowerCase();
+    results.replaceChildren(renderHeader(expressId, name, ifcClass));
+    let matches = 0;
+    for (const group of groups) {
+      const rows = query
+        ? group.rows.filter(({ label, value }) =>
+            label.toLowerCase().includes(query) || value.toLowerCase().includes(query))
+        : group.rows;
+      if (query && rows.length === 0) continue;
+      matches += rows.length;
+      results.appendChild(renderGroup({ ...group, rows, open: query ? true : group.open }));
+    }
+    if (current.unavailable) results.appendChild(note("No parameters available for this element."));
+    else if (query && matches === 0) results.appendChild(note("No matching properties."));
   }
 
   function reset() {
-    root.innerHTML = `<div class="muted" style="padding:8px">Click an element to inspect.</div>`;
+    current = null;
+    results.replaceChildren(note("Click an element to inspect."));
   }
 }
 
