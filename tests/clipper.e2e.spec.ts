@@ -17,6 +17,31 @@ async function loaded(app: Awaited<ReturnType<typeof launchViewer>>) {
   return page;
 }
 
+test("clipping state preserves a freely oriented plane transform", async () => {
+  test.setTimeout(180_000);
+  const app = await launchViewer();
+  try {
+    const page = await loaded(app);
+    const rotation = { x: 0, y: Math.SQRT1_2, z: 0, w: Math.SQRT1_2 };
+    const position = { x: 1, y: 2, z: 3 };
+    const state = await page.evaluate(({ position, rotation }) => {
+      const viewer = (window as any).__viewer;
+      viewer.setClippingState({
+        enabled: true,
+        mode: "plane",
+        transform: { position, rotation },
+      });
+      return viewer.getClippingState();
+    }, { position, rotation });
+
+    expect(state.transform.position).toEqual(position);
+    expect(state.transform.rotation).toEqual(rotation);
+    expect(state).not.toHaveProperty("axis");
+  } finally {
+    await app.close();
+  }
+});
+
 /**
  * The clip button used to throw on every activation: OBC's SimplePlane builds a
  * three TransformControls gizmo and indexes `controls.object.children[0]

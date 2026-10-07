@@ -1594,15 +1594,15 @@ export class Viewer {
         if (mode === "plane" && this.gizmos[0]) {
           this.gizmos[0].proxy.position[axis] = planePos;
         } else if (mode === "slice" && this.gizmos.length >= 2) {
-          this.gizmos[0].proxy.position[axis] = sliceMin;
-          this.gizmos[1].proxy.position[axis] = sliceMax;
+          this.gizmos[0]!.proxy.position[axis] = sliceMin;
+          this.gizmos[1]!.proxy.position[axis] = sliceMax;
         } else if (mode === "box" && this.gizmos.length >= 6) {
-          this.gizmos[0].proxy.position["x"] = boxMin.x;
-          this.gizmos[1].proxy.position["x"] = boxMax.x;
-          this.gizmos[2].proxy.position["y"] = boxMin.y;
-          this.gizmos[3].proxy.position["y"] = boxMax.y;
-          this.gizmos[4].proxy.position["z"] = boxMin.z;
-          this.gizmos[5].proxy.position["z"] = boxMax.z;
+          this.gizmos[0]!.proxy.position["x"] = boxMin.x;
+          this.gizmos[1]!.proxy.position["x"] = boxMax.x;
+          this.gizmos[2]!.proxy.position["y"] = boxMin.y;
+          this.gizmos[3]!.proxy.position["y"] = boxMax.y;
+          this.gizmos[4]!.proxy.position["z"] = boxMin.z;
+          this.gizmos[5]!.proxy.position["z"] = boxMax.z;
         }
       }
     }
